@@ -55,6 +55,7 @@ def _row(delivery: str = "d1") -> EventRow:
         last_error=None,
     )
 
+
 @pytest.mark.asyncio
 async def test_non_root_fallback_semaphore_caps_dispatch_concurrency(
     settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch

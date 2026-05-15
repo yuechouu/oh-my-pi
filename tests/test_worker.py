@@ -212,6 +212,7 @@ async def test_run_rpc_omits_home_when_agent_home_absent(
     assert client_kwargs["env"]["ROBOMP_REPLAY_TOKEN"] == ""
     assert client_kwargs["env"]["ROBOMP_GH_PROXY_HMAC_KEY"] == ""
 
+
 @pytest.mark.asyncio
 async def test_run_rpc_skips_set_todos_on_resumed_triage(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=True)
@@ -269,9 +270,7 @@ async def test_run_rpc_merges_todos_on_followup_with_resume(tmp_path: Path, sett
 
 
 @pytest.mark.asyncio
-async def test_run_rpc_passes_slot_uid_user_slot_group_and_omp_extra_group(
-    tmp_path: Path, settings: Settings
-) -> None:
+async def test_run_rpc_passes_slot_uid_user_slot_group_and_omp_extra_group(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False, slot_uid=2001)
     loop = asyncio.new_event_loop()
     try:

@@ -43,7 +43,7 @@ def test_rejects_token_and_proxy_together(monkeypatch: pytest.MonkeyPatch, env: 
 
 
 def test_rejects_proxy_url_without_key(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
-    monkeypatch.delenv("ROBOMP_GH_PROXY_HMAC_KEY", raising=False)
+    monkeypatch.setenv("ROBOMP_GH_PROXY_HMAC_KEY", "")
     reset_settings_cache()
     with pytest.raises(ValidationError):
         Settings()  # type: ignore[call-arg]
