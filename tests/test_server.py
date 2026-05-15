@@ -70,6 +70,8 @@ def test_index_serves_dashboard_html(settings: Settings) -> None:
     assert "<title>robomp</title>" in resp.text
     assert "api/status" in resp.text
     assert "api/logs" in resp.text
+    assert "Retry latest run" in resp.text
+    assert "current issue events" in resp.text
 
 
 def test_api_status_reports_runtime_counts_and_inflight(settings: Settings) -> None:
@@ -645,7 +647,9 @@ def test_trigger_retry_by_issue_finds_latest_non_skipped_event(env, monkeypatch:
         assert resp.status_code == 202, body
         # Most recently-received non-skipped row wins; ignored label events do not hide it.
         assert body["delivery"] == "d-old-2"
-        assert get_database(cfg.sqlite_path).get_event("d-old-2").state == "queued"
+        retried = get_database(cfg.sqlite_path).get_event("d-old-2")
+        assert retried is not None
+        assert retried.state == "queued"
     close_database()
 
 
