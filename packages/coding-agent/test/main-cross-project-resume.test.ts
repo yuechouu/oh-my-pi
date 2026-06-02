@@ -6,7 +6,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createSessionManager } from "@oh-my-pi/pi-coding-agent/main";
+import { createSessionManager, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as sessionManagerModule from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
@@ -17,6 +19,18 @@ function buildArgs(resume: string): Args {
 		fileArgs: [],
 		unknownFlags: new Map(),
 	};
+}
+
+function buildRootSettings(): Settings {
+	return {
+		get: (key: string) => {
+			if (key === "disabledProviders") return [];
+			return undefined;
+		},
+		getStorage: () => undefined,
+		override: () => {},
+		overrideModelRoles: () => {},
+	} as unknown as Settings;
 }
 
 function buildGlobalMatch(cwd: string): { session: SessionInfo; scope: "global" } {
@@ -36,6 +50,33 @@ function buildGlobalMatch(cwd: string): { session: SessionInfo; scope: "global" 
 		},
 	};
 }
+
+describe("runRootCommand — cross-project --resume cancellation (#1668)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("stops theme watching before returning after an interactive resume decline", async () => {
+		const args = buildArgs("019e84ed");
+		vi.spyOn(themeModule, "initTheme").mockResolvedValue(undefined);
+		const stopThemeWatcherSpy = vi.spyOn(themeModule, "stopThemeWatcher").mockImplementation(() => {});
+		vi.spyOn(Bun.stdin, "text").mockResolvedValue("");
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+		await runRootCommand(args, [], {
+			discoverAuthStorage: async () =>
+				({
+					hasAuth: () => false,
+					setConfigApiKey: () => {},
+					setFallbackResolver: () => {},
+				}) as unknown as AuthStorage,
+			createSessionManager: async () => undefined,
+			settings: buildRootSettings(),
+		});
+
+		expect(stopThemeWatcherSpy).toHaveBeenCalledTimes(1);
+	});
+});
 
 describe("createSessionManager — cross-project --resume cancellation (#1668)", () => {
 	afterEach(() => {

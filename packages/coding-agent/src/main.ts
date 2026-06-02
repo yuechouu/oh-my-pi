@@ -696,6 +696,7 @@ async function buildSessionOptions(
 interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
+	createSessionManager?: typeof createSessionManager;
 	runAcpMode?: typeof runAcpMode;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
@@ -851,10 +852,12 @@ export async function runRootCommand(
 		);
 	}
 
+	const createSessionManagerImpl = deps.createSessionManager ?? createSessionManager;
+
 	// Create session manager based on CLI flags
 	let sessionManager = await logger.time(
 		"createSessionManager",
-		createSessionManager,
+		createSessionManagerImpl,
 		parsedArgs,
 		cwd,
 		settingsInstance,
@@ -865,6 +868,7 @@ export async function runRootCommand(
 	// (see issue #1668).
 	if (typeof parsedArgs.resume === "string" && !sessionManager) {
 		process.stdout.write(`${chalk.dim("Resume cancelled: session is in another project.")}\n`);
+		stopThemeWatcher();
 		return;
 	}
 
