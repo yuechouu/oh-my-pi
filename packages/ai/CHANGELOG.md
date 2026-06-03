@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added MiniMax M3 to the MiniMax Coding Plan model catalog so it appears for China and international Coding Plan credentials. ([#1790](https://github.com/can1357/oh-my-pi/issues/1790))
+
 ## [15.8.2] - 2026-06-03
 
 ### Fixed
