@@ -25,23 +25,34 @@ jobs:
           # Step 1: Replace @oh-my-pi/ with @yuechou/ in ALL package.json
           find packages -name "package.json" -exec sed -i 's|"@oh-my-pi/|"@yuechou/|g' {} +
 
-          # Step 2: Use node to resolve catalog: references
+          # Step 2: Use node to resolve catalog: and fix versions
           node -e "
             const fs = require('fs');
             const path = require('path');
-            const version = process.env.VERSION;
+            const tagVersion = process.env.VERSION; // e.g. v15.8.3-patched.3
+            const version = tagVersion.replace(/^v/, '');
 
-            // Read catalog from root
+            // Read root and rewrite catalog
             const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             let catalog = root.workspaces?.catalog || {};
 
-            // Rewrite catalog keys: @oh-my-pi/ -> @yuechou/
+            // Build new catalog: rewrite scope + update @yuechou/* internal versions to this tag
             const newCatalog = {};
             for (const [k, v] of Object.entries(catalog)) {
               const key = k.replace('@oh-my-pi/', '@yuechou/');
-              newCatalog[key] = v;
+              // Update internal @yuechou/* packages to match this release version
+              if (key.startsWith('@yuechou/')) {
+                newCatalog[key] = version;
+              } else {
+                newCatalog[key] = v;
+              }
             }
             catalog = newCatalog;
+
+            // Update root package.json catalog
+            root.workspaces.catalog = newCatalog;
+            fs.writeFileSync('package.json', JSON.stringify(root, null, 2) + '\n');
+            console.log('Updated root catalog');
 
             // Process each package
             const dirs = fs.readdirSync('packages').filter(d =>
@@ -52,7 +63,6 @@ jobs:
               const fpath = path.join('packages', dir, 'package.json');
               let pkg = JSON.parse(fs.readFileSync(fpath, 'utf8'));
 
-              // Replace catalog: in dependencies/devDependencies/peerDependencies
               for (const depType of ['dependencies', 'devDependencies', 'peerDependencies']) {
                 if (!pkg[depType]) continue;
                 for (const [name, ver] of Object.entries(pkg[depType])) {
@@ -66,7 +76,6 @@ jobs:
                 }
               }
 
-              // Update version
               pkg.version = version;
               fs.writeFileSync(fpath, JSON.stringify(pkg, null, '\t') + '\n');
               console.log('Rewrote: ' + fpath + ' -> ' + pkg.name + '@' + version);
