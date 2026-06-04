@@ -8,6 +8,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { SessionManager } from "../../session/session-manager";
+import { loadExtensions } from "./loader";
 import type {
 	AfterProviderResponseEvent,
 	AssistantThinkingRenderer,
@@ -199,13 +200,107 @@ export class ExtensionRunner {
 	#pendingCredentialDisabled: CredentialDisabledEvent[] = [];
 
 	constructor(
-		private readonly extensions: Extension[],
+		private extensions: Extension[],
 		private readonly runtime: ExtensionRuntime,
 		private readonly cwd: string,
 		private readonly sessionManager: SessionManager,
 		private readonly modelRegistry: ModelRegistry,
 	) {
 		this.#uiContext = noOpUIContext;
+	}
+
+	/**
+	 * Load and add a single extension at runtime.
+	 * @param extensionPath Path to the extension module or directory
+	 * @returns The loaded Extension, or null on failure
+	 */
+	async addExtension(extensionPath: string): Promise<Extension | null> {
+		// Check if already loaded (by path)
+		const path = await import("node:path");
+		const resolved = path.resolve(this.cwd, extensionPath);
+		const existing = this.extensions.find((e) => e.resolvedPath === resolved || e.path === extensionPath);
+		if (existing) {
+			logger.warn("Extension already loaded, skipping", { extensionPath });
+			return existing;
+		}
+
+		const result = await loadExtensions([extensionPath], this.cwd);
+		if (result.errors.length > 0) {
+			for (const err of result.errors) {
+				this.emitError({ type: "handler_error", extensionPath: err.path, error: new Error(err.error) });
+			}
+			return null;
+		}
+
+		const ext = result.extensions[0];
+		if (ext) {
+			this.extensions = [...this.extensions, ext];
+			// Emit session_start to initialize the new extension
+			try {
+				await this.emit({ type: "session_start" });
+			} catch {
+				// Best-effort
+			}
+		}
+		return ext ?? null;
+	}
+
+	/**
+	 * Remove an extension at runtime by path.
+	 * @param extensionPath Path (or resolvedPath) of the extension to remove
+	 * @returns true if the extension was found and removed
+	 */
+	async removeExtension(extensionPath: string): Promise<boolean> {
+		const path = await import("node:path");
+		const resolved = path.resolve(this.cwd, extensionPath);
+		const idx = this.extensions.findIndex((e) => e.resolvedPath === resolved || e.path === extensionPath);
+		if (idx === -1) return false;
+
+		const ext = this.extensions[idx];
+
+		// Emit session_shutdown so the extension can clean up
+		const handlers = ext.handlers.get("session_shutdown");
+		if (handlers) {
+			for (const handler of handlers) {
+				try {
+					await handler({}, this.createContext());
+				} catch (err) {
+					logger.warn("Extension session_shutdown handler error", {
+						extensionPath,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				}
+			}
+		}
+
+		// Remove from array
+		this.extensions = [...this.extensions.slice(0, idx), ...this.extensions.slice(idx + 1)];
+		return true;
+	}
+
+	/**
+	 * Reload extensions: diff current set against new paths, add/remove as needed.
+	 * Extensions whose path appears in both sets are left untouched.
+	 * @param extensionPaths New set of extension paths
+	 */
+	async reloadExtensions(extensionPaths: string[]): Promise<void> {
+		const path = await import("node:path");
+		const newResolved = new Set(extensionPaths.map((p) => path.resolve(this.cwd, p)));
+
+		// Remove extensions not in new set
+		const toRemove = this.extensions.filter((e) => !newResolved.has(e.resolvedPath));
+		for (const ext of toRemove) {
+			await this.removeExtension(ext.path);
+		}
+
+		// Add extensions not yet loaded
+		const currentResolved = new Set(this.extensions.map((e) => e.resolvedPath));
+		for (const extPath of extensionPaths) {
+			const resolved = path.resolve(this.cwd, extPath);
+			if (!currentResolved.has(resolved)) {
+				await this.addExtension(extPath);
+			}
+		}
 	}
 
 	initialize(
