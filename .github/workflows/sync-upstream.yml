@@ -2,8 +2,8 @@ name: Sync Upstream
 
 on:
   schedule:
-    # 每周一早上 9 点 UTC (北京时间 17 点)
-    - cron: '0 9 * * 1'
+    # 每小时检查一次上游是否有更新
+    - cron: '17 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -15,7 +15,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Sync upstream main
+      - name: Check and sync upstream
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -26,18 +26,29 @@ jobs:
           # Fetch upstream
           git fetch upstream main
 
+          # 比较本地 main 和上游 main，没更新就跳过
+          LOCAL=$(git rev-parse main)
+          UPSTREAM=$(git rev-parse upstream/main)
+          if [ "$LOCAL" = "$UPSTREAM" ]; then
+            echo "✅ No upstream changes, skipping."
+            exit 0
+          fi
+
+          echo "🔄 Upstream updated: $LOCAL → $UPSTREAM"
+
           # Merge upstream/main into main
           git checkout main
           git merge upstream/main --no-edit --strategy-option theirs || {
-            echo "⚠️ Merge conflict, creating PR instead"
+            echo "⚠️ Merge conflict, manual intervention needed"
             git merge --abort
-            exit 0
+            exit 1
           }
 
           # Push updated main
           git push origin main
 
       - name: Rebase patched branch
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -47,8 +58,10 @@ jobs:
           git rebase main --strategy-option theirs || {
             echo "⚠️ Rebase conflict, manual intervention needed"
             git rebase --abort
-            exit 0
+            exit 1
           }
 
           # Force push rebased patched
           git push origin patched --force-with-lease
+
+          echo "✅ Synced: main and patched are up to date with upstream."
