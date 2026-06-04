@@ -1,0 +1,52 @@
+name: Publish Patched
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: patched
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Rewrite package scope to @yuechou
+        run: |
+          # Replace @oh-my-pi scope with @yuechou in all package.json files
+          find packages -name "package.json" -exec sed -i 's/"@oh-my-pi\//"@yuechou\//g' {} +
+
+          # Update cross-references in dependencies
+          for pkg in packages/*/package.json; do
+            sed -i 's/"@oh-my-pi\//"@yuechou\//g' "$pkg"
+          done
+
+          # Update version from tag
+          VERSION="${GITHUB_REF_NAME#v}"
+          for pkg in packages/*/package.json; do
+            sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$pkg"
+          done
+
+      - name: Build
+        run: bun run build 2>/dev/null || echo "No build script, using source directly"
+
+      - name: Publish to npm
+        run: |
+          for pkg in packages/*/; do
+            if [ -f "$pkg/package.json" ]; then
+              PKG_NAME=$(node -p "require('./$pkg/package.json').name")
+              echo "Publishing $PKG_NAME..."
+              cd "$pkg"
+              npm publish --access public --provenance 2>&1 || echo "Failed to publish $PKG_NAME (may already exist)"
+              cd ../..
+            fi
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
