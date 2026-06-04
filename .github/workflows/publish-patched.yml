@@ -71,7 +71,7 @@ jobs:
               // Update version
               pkg.version = version;
               fs.writeFileSync(fpath, JSON.stringify(pkg, null, '\t') + '\n');
-              console.log('Rewrote: ' + fpath + ' -> ' + name + '@' + version);
+              console.log('Rewrote: ' + fpath + ' -> ' + pkg.name + '@' + version);
             }
           "
 
