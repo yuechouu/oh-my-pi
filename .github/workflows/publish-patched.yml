@@ -37,6 +37,10 @@ jobs:
       - name: Build
         run: bun run build 2>/dev/null || echo "No build script, using source directly"
 
+      - name: Configure npm auth
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+
       - name: Publish to npm
         run: |
           for pkg in packages/*/; do
@@ -44,9 +48,7 @@ jobs:
               PKG_NAME=$(node -p "require('./$pkg/package.json').name")
               echo "Publishing $PKG_NAME..."
               cd "$pkg"
-              npm publish --access public --provenance 2>&1 || echo "Failed to publish $PKG_NAME (may already exist)"
+              npm publish --access public 2>&1 || echo "Failed to publish $PKG_NAME (may already exist)"
               cd ../..
             fi
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
