@@ -23,11 +23,13 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           # Step 0: Replace @oh-my-pi/ with @yuechou/ in source imports
-          find packages -name "*.ts" -exec sed -i 's|@oh-my-pi/|@yuechou/|g' {} +
-          find packages -name "*.tsx" -exec sed -i 's|@oh-my-pi/|@yuechou/|g' {} +
+          # Skip pi-natives references — use original @oh-my-pi native addons
+          find packages -name "*.ts" -exec sed -i '/pi-natives/!s|@oh-my-pi/|@yuechou/|g' {} +
+          find packages -name "*.tsx" -exec sed -i '/pi-natives/!s|@oh-my-pi/|@yuechou/|g' {} +
 
-          # Step 1: Replace @oh-my-pi/ with @yuechou/ in ALL package.json
-          find packages -name "package.json" -exec sed -i 's|"@oh-my-pi/|"@yuechou/|g' {} +
+          # Step 1: Replace @oh-my-pi/ with @yuechou/ in package.json
+          # Skip pi-natives dependencies — keep original @oh-my-pi native addons
+          find packages -name "package.json" -exec sed -i '/pi-natives/!s|"@oh-my-pi/|"@yuechou/|g' {} +
 
           # Step 2: Use node to resolve catalog: and fix versions
           node -e "
@@ -41,8 +43,13 @@ jobs:
             let catalog = root.workspaces?.catalog || {};
 
             // Build new catalog: rewrite scope + update @yuechou/* internal versions to this tag
+            // Skip pi-natives — use original @oh-my-pi native addons
             const newCatalog = {};
             for (const [k, v] of Object.entries(catalog)) {
+              if (k.includes('pi-natives')) {
+                newCatalog[k] = v; // keep original @oh-my-pi/pi-natives
+                continue;
+              }
               const key = k.replace('@oh-my-pi/', '@yuechou/');
               // Update internal @yuechou/* packages to match this release version
               if (key.startsWith('@yuechou/')) {
