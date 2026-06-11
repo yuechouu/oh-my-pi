@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: patched
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -29,25 +29,38 @@ jobs:
       - name: Fetch upstream main
         run: git fetch upstream main
 
-      - name: Check for new commits
+      # Step 1: upstream main → fork main
+      - name: Check for new upstream commits
         id: check
         run: |
           UPSTREAM=$(git rev-parse upstream/main)
           MERGE_BASE=$(git merge-base HEAD upstream/main)
           if [ "$UPSTREAM" = "$MERGE_BASE" ]; then
             echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
-            echo "✅ patched is already up to date with upstream/main"
+            echo "✅ main is already up to date with upstream"
           else
             echo "already_up_to_date=false" >> "$GITHUB_OUTPUT"
             NEW_COMMITS=$(git rev-list --count "$MERGE_BASE".."$UPSTREAM")
             echo "📥 Found $NEW_COMMITS new commit(s) from upstream"
           fi
 
-      - name: Merge upstream into patched
+      - name: Merge upstream into main
         if: steps.check.outputs.already_up_to_date == 'false'
         run: |
           git merge upstream/main --no-edit --no-ff \
-            -m "sync: merge upstream/main into patched"
+            -m "sync: merge upstream/main into main"
+
+      - name: Push main
+        if: steps.check.outputs.already_up_to_date == 'false'
+        run: git push origin main
+
+      # Step 2: fork main → patched
+      - name: Merge main into patched
+        if: steps.check.outputs.already_up_to_date == 'false'
+        run: |
+          git checkout patched
+          git merge main --no-edit --no-ff \
+            -m "sync: merge main into patched"
 
       - name: Push patched
         if: steps.check.outputs.already_up_to_date == 'false'
