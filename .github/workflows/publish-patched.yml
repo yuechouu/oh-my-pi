@@ -83,7 +83,7 @@ jobs:
               PKG_NAME=$(node -p "require('./$pkg/package.json').name")
               echo "Publishing $PKG_NAME..."
               cd "$pkg"
-              npm publish --access public 2>&1 || echo "Failed to publish $PKG_NAME (may already exist)"
+              npm publish --access public --ignore-scripts 2>&1 || echo "Failed to publish $PKG_NAME (may already exist)"
               cd ../..
             fi
           done
