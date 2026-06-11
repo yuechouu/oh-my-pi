@@ -18,83 +18,59 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Rewrite scope and resolve catalog
+      - name: Build (original scope)
+        run: bun run build 2>/dev/null || echo "No build script, using source directly"
+
+      - name: Rewrite scope for publish
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          # Step 0: Replace @oh-my-pi/ with @yuechou/ in source imports
-          # Skip pi-natives references — use original @oh-my-pi native addons
+          VERSION="${VERSION#v}"
+
+          # Rewrite @oh-my-pi/ → @yuechou/ in source (skip pi-natives)
           find packages -name "*.ts" -exec sed -i '/pi-natives/!s|@oh-my-pi/|@yuechou/|g' {} +
           find packages -name "*.tsx" -exec sed -i '/pi-natives/!s|@oh-my-pi/|@yuechou/|g' {} +
 
-          # Step 1: Replace @oh-my-pi/ with @yuechou/ in package.json
-          # Skip pi-natives dependencies — keep original @oh-my-pi native addons
+          # Rewrite package.json (skip pi-natives)
           find packages -name "package.json" -exec sed -i '/pi-natives/!s|"@oh-my-pi/|"@yuechou/|g' {} +
 
-          # Step 2: Use node to resolve catalog: and fix versions
+          # Resolve catalog: references and set version
           node -e "
             const fs = require('fs');
             const path = require('path');
-            const tagVersion = process.env.VERSION; // e.g. v15.8.3-patched.3
-            const version = tagVersion.replace(/^v/, '');
+            const version = '$VERSION';
 
-            // Read root and rewrite catalog
             const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             let catalog = root.workspaces?.catalog || {};
 
-            // Build new catalog: rewrite scope + update @yuechou/* internal versions to this tag
-            // Skip pi-natives — use original @oh-my-pi native addons
             const newCatalog = {};
             for (const [k, v] of Object.entries(catalog)) {
-              if (k.includes('pi-natives')) {
-                newCatalog[k] = v; // keep original @oh-my-pi/pi-natives
-                continue;
-              }
+              if (k.includes('pi-natives')) { newCatalog[k] = v; continue; }
               const key = k.replace('@oh-my-pi/', '@yuechou/');
-              // Update internal @yuechou/* packages to match this release version
-              if (key.startsWith('@yuechou/')) {
-                newCatalog[key] = version;
-              } else {
-                newCatalog[key] = v;
-              }
+              newCatalog[key] = key.startsWith('@yuechou/') ? version : v;
             }
-            catalog = newCatalog;
-
-            // Update root package.json catalog
             root.workspaces.catalog = newCatalog;
             fs.writeFileSync('package.json', JSON.stringify(root, null, 2) + '\n');
-            console.log('Updated root catalog');
 
-            // Process each package
             const dirs = fs.readdirSync('packages').filter(d =>
               fs.existsSync(path.join('packages', d, 'package.json'))
             );
-
             for (const dir of dirs) {
               const fpath = path.join('packages', dir, 'package.json');
               let pkg = JSON.parse(fs.readFileSync(fpath, 'utf8'));
-
               for (const depType of ['dependencies', 'devDependencies', 'peerDependencies']) {
                 if (!pkg[depType]) continue;
                 for (const [name, ver] of Object.entries(pkg[depType])) {
-                  if (ver === 'catalog:') {
-                    if (catalog[name]) {
-                      pkg[depType][name] = catalog[name];
-                    } else {
-                      console.log('WARNING: no catalog entry for ' + name);
-                    }
+                  if (ver === 'catalog:' && newCatalog[name]) {
+                    pkg[depType][name] = newCatalog[name];
                   }
                 }
               }
-
               pkg.version = version;
               fs.writeFileSync(fpath, JSON.stringify(pkg, null, '\t') + '\n');
-              console.log('Rewrote: ' + fpath + ' -> ' + pkg.name + '@' + version);
+              console.log('Rewrote: ' + pkg.name + '@' + version);
             }
           "
-
-      - name: Build
-        run: bun run build 2>/dev/null || echo "No build script, using source directly"
 
       - name: Configure npm auth
         run: |
