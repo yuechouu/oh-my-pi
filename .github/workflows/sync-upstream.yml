@@ -1,0 +1,70 @@
+name: Sync upstream to patched
+
+on:
+  schedule:
+    # Every 6 hours (offset to avoid :00/:30 stampede)
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: patched
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/can1357/oh-my-pi.git || true
+
+      - name: Fetch upstream main
+        run: git fetch upstream main
+
+      - name: Check for new commits
+        id: check
+        run: |
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/main)
+          MERGE_BASE=$(git merge-base HEAD upstream/main)
+          if [ "$UPSTREAM" = "$MERGE_BASE" ]; then
+            echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "✅ patched is already up to date with upstream/main"
+          else
+            echo "already_up_to_date=false" >> "$GITHUB_OUTPUT"
+            NEW_COMMITS=$(git rev-list --count "$MERGE_BASE".."$UPSTREAM")
+            echo "📥 Found $NEW_COMMITS new commit(s) from upstream"
+          fi
+
+      - name: Merge upstream into patched
+        if: steps.check.outputs.already_up_to_date == 'false'
+        run: |
+          git merge upstream/main --no-edit --no-ff \
+            -m "sync: merge upstream/main into patched"
+
+      - name: Push patched
+        if: steps.check.outputs.already_up_to_date == 'false'
+        run: git push origin patched
+
+      - name: Create issue on conflict
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ Upstream sync conflict',
+              body: [
+                'Auto-merge from `can1357/oh-my-pi:main` into `patched` failed.',
+                '',
+                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                '',
+                'Please resolve conflicts manually.',
+              ].join('\n'),
+              labels: ['upstream-sync'],
+            });
