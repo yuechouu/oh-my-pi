@@ -1101,6 +1101,19 @@ export interface ExtensionAPI {
 	 */
 	registerProvider(name: string, config: ProviderConfig): void;
 
+	// =========================================================================
+	// Dynamic Extension Management
+	// =========================================================================
+
+	/** Load and add a single extension at runtime. Returns true on success. */
+	addExtension(extensionPath: string): Promise<boolean>;
+
+	/** Remove an extension at runtime by path. Triggers session_shutdown cleanup. */
+	removeExtension(extensionPath: string): Promise<boolean>;
+
+	/** Reload extensions: diff current set against new paths, add/remove as needed. */
+	reloadExtensions(extensionPaths: string[]): Promise<void>;
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
 }
@@ -1257,6 +1270,9 @@ export interface ExtensionActions {
 	setThinkingLevel: SetThinkingLevelHandler;
 	getSessionName: () => string | undefined;
 	setSessionName: (name: string) => Promise<void>;
+	addExtension: (extensionPath: string) => Promise<boolean>;
+	removeExtension: (extensionPath: string) => Promise<boolean>;
+	reloadExtensions: (extensionPaths: string[]) => Promise<void>;
 }
 
 /** Actions for ExtensionContext (ctx.* in event handlers). */

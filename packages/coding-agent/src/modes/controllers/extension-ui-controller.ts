@@ -118,6 +118,12 @@ export class ExtensionUiController {
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
+			addExtension: async path => {
+				const ext = await extensionRunner.addExtension(path);
+				return ext !== null;
+			},
+			removeExtension: path => extensionRunner.removeExtension(path),
+			reloadExtensions: paths => extensionRunner.reloadExtensions(paths),
 		};
 		const contextActions: ExtensionContextActions = {
 			getModel: () => this.ctx.session.model,
@@ -354,6 +360,12 @@ export class ExtensionUiController {
 			getCommands: () => getSessionSlashCommands(this.ctx.session),
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
+			addExtension: async path => {
+				const ext = await extensionRunner.addExtension(path);
+				return ext !== null;
+			},
+			removeExtension: path => extensionRunner.removeExtension(path),
+			reloadExtensions: paths => extensionRunner.reloadExtensions(paths),
 		};
 		const contextActions: ExtensionContextActions = {
 			getModel: () => this.ctx.session.model,

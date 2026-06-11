@@ -1996,6 +1996,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						setSessionName: async name => {
 							await session.sessionManager.setSessionName(name, "user");
 						},
+						addExtension: async path => {
+							const ext = await extensionRunner.addExtension(path);
+							return ext !== null;
+						},
+						removeExtension: path => extensionRunner.removeExtension(path),
+						reloadExtensions: paths => extensionRunner.reloadExtensions(paths),
 					},
 					{
 						getModel: () => session.model,

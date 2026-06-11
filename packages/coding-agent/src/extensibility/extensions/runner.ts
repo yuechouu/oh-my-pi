@@ -326,6 +326,9 @@ export class ExtensionRunner {
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
+		this.runtime.addExtension = actions.addExtension;
+		this.runtime.removeExtension = actions.removeExtension;
+		this.runtime.reloadExtensions = actions.reloadExtensions;
 
 		// Context actions (required)
 		this.#getModel = contextActions.getModel;
