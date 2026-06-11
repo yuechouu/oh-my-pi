@@ -27,7 +27,7 @@ jobs:
         run: git remote add upstream https://github.com/can1357/oh-my-pi.git || true
 
       - name: Fetch upstream main
-        run: git fetch upstream main
+        run: git fetch upstream main --tags
 
       # Step 1: upstream main → fork main
       - name: Check for new upstream commits
@@ -65,3 +65,24 @@ jobs:
       - name: Push patched
         if: steps.check.outputs.already_up_to_date == 'false'
         run: git push origin patched
+
+      # Step 3: bump tag and trigger Publish Patched
+      - name: Create release tag
+        if: steps.check.outputs.already_up_to_date == 'false'
+        id: tag
+        run: |
+          # Get upstream version from package.json on patched
+          UPSTREAM_VER=$(node -p "require('./package.json').version")
+          # Find latest patched.N tag for this upstream version
+          LATEST=$(git tag -l "v${UPSTREAM_VER}-patched.*" --sort=-v:refname | head -1)
+          if [ -z "$LATEST" ]; then
+            NEXT=1
+          else
+            CURRENT=$(echo "$LATEST" | grep -oP 'patched\.\K\d+')
+            NEXT=$((CURRENT + 1))
+          fi
+          NEW_TAG="v${UPSTREAM_VER}-patched.${NEXT}"
+          echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "🏷️ Creating tag $NEW_TAG on patched"
+          git tag "$NEW_TAG" patched
+          git push origin "$NEW_TAG"
