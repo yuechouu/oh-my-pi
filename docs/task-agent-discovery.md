@@ -24,7 +24,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - `name`, `description`, `systemPrompt` (required for a valid loaded agent)
-- optional `tools`, `spawns`, `model`, `thinkingLevel`, `output`, `blocking`
+- optional `tools`, `spawns`, `model`, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`
 - `source`: `"bundled" | "user" | "project"`
 - optional `filePath`
 
@@ -35,6 +35,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `spawns` accepts `*`, CSV, or array
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
+- `read-summarize: false` (parsed as `readSummarize`) forces the subagent's `read` tool to return verbatim file content instead of structural summaries — `runSubprocess` applies it as a `read.summarize.enabled: false` override on the subagent's isolated settings (`src/task/executor.ts`). `explore` and `librarian` ship with it disabled. Defaults to enabled when the field is absent.
 
 ## Bundled agents
 
@@ -140,11 +141,10 @@ In synchronous task execution (`TaskTool.#executeSync`):
 
 Runtime output schema precedence in `TaskTool.execute`:
 
-1. task call `params.schema` when `task.simple` allows custom schemas
-2. agent frontmatter `output`
-3. parent session `outputSchema`
+1. agent frontmatter `output`
+2. parent session `outputSchema`
 
-(`effectiveOutputSchema = outputSchema ?? effectiveAgent.output ?? this.session.outputSchema` when custom task schemas are enabled; otherwise task-call schema is skipped.)
+(`effectiveOutputSchema = effectiveAgent.output ?? this.session.outputSchema` — the task call itself never carries a schema; ad-hoc structured workflows go through the eval bridge's `agent(prompt, schema)`.)
 
 Prompt-time guardrail text in `src/prompts/tools/task.md` warns about mismatch behavior for structured-output agents (`explore`, `reviewer`): output-format instructions in prose can conflict with built-in schema and produce `null` outputs.
 

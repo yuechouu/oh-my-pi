@@ -7,14 +7,22 @@ import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
-const FILE_LINE_RANGE_RE = /^(?:L?\d+(?:[-+]L?\d+|-)?(?:,L?\d+(?:[-+]L?\d+|-)?)*|raw|conflicts)$/i;
-const FILE_LINE_RANGE_ONLY_RE = /^L?\d+(?:[-+]L?\d+|-)?(?:,L?\d+(?:[-+]L?\d+|-)?)*$/i;
+// A single line-range chunk: `N`, `N-M`, `N+K`, or open-ended `N-`. `..` is
+// accepted everywhere `-` is, as a forgiving alias for Rust/Python-style ranges
+// (e.g. `2724..2727` == `2724-2727`, `2724..` == `2724-`); it is normalized to
+// `-` in parseLineRangeChunk. Keep this fragment and LINE_RANGE_CHUNK_RE in sync.
+const RANGE_CHUNK_SRC = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
+const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts)$`, "i");
+const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^${RANGE_LIST_SRC}$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
 // plus common malformed shapes (e.g. `:-N`) so the read tool peels the entire
 // selector chain off before dispatching to a protocol handler.
-const INTERNAL_URL_SELECTOR_PART_RE =
-	/^(?:raw|conflicts|L?\d+(?:[-+]L?\d+|-)?(?:,L?\d+(?:[-+]L?\d+|-)?)*|-\d+(?:[-+]\d+)?)$/i;
+const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
+	String.raw`^(?:raw|conflicts|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
+	"i",
+);
 // Schemes whose host grammar is identifier-shaped, so any trailing
 // `:<selector-chunk>` is unambiguously a read-tool selector. `mcp://` is
 // excluded because mcp resource URIs may legitimately contain colons.
@@ -144,9 +152,9 @@ export interface LineRange {
 	endLine: number | undefined;
 }
 
-const LINE_RANGE_CHUNK_RE = /^L?(\d+)(?:([-+])L?(\d+)?)?$/i;
+const LINE_RANGE_CHUNK_RE = /^L?(\d+)(?:(\.\.|[-+])L?(\d+)?)?$/i;
 
-/** Parse a single `N`, `N-M`, `N-`, or `N+K` chunk. Throws via {@link ToolError} on invalid bounds. */
+/** Parse a single `N`, `N-M`, `N-`, `N+K`, or `..`-aliased (`N..M`, `N..`) chunk. Throws via {@link ToolError} on invalid bounds. */
 export function parseLineRangeChunk(sel: string): LineRange | null {
 	const lineMatch = LINE_RANGE_CHUNK_RE.exec(sel);
 	if (!lineMatch) return null;
@@ -154,7 +162,8 @@ export function parseLineRangeChunk(sel: string): LineRange | null {
 	if (rawStart < 1) {
 		throw new ToolError("Line selector 0 is invalid; lines are 1-indexed. Use :1.");
 	}
-	const sep = lineMatch[2];
+	// `..` is a forgiving alias for `-` (e.g. `2724..2727` == `2724-2727`).
+	const sep = lineMatch[2] === ".." ? "-" : lineMatch[2];
 	const rhs = lineMatch[3] ? Number.parseInt(lineMatch[3], 10) : undefined;
 	let rawEnd: number | undefined;
 	if (sep === "+") {
@@ -206,6 +215,27 @@ export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null
 		merged.push(current);
 	}
 	return merged as [LineRange, ...LineRange[]];
+}
+
+/**
+ * Extract the line-range component from a read-tool selector that may also
+ * carry a verbatim/index display mode (`raw`, `conflicts`) — alone or compounded
+ * with a range (`raw:50-100`, `50-100:raw`). Returns the parsed ranges when the
+ * selector names any, otherwise `undefined` (pure `raw`/`conflicts`/none).
+ *
+ * Used by content search, which honors line ranges as a match filter but has no
+ * use for verbatim/conflict display modes — so those selectors are accepted and
+ * treated as an unfiltered, whole-resource search rather than rejected.
+ */
+export function selectorLineRanges(sel: string | undefined): [LineRange, ...LineRange[]] | undefined {
+	if (!sel) return undefined;
+	for (const chunk of sel.split(":")) {
+		const lower = chunk.toLowerCase();
+		if (lower === "raw" || lower === "conflicts") continue;
+		const ranges = parseLineRanges(chunk);
+		if (ranges) return ranges;
+	}
+	return undefined;
 }
 
 /** Return `true` when `lineNumber` (1-indexed) falls in any of the supplied ranges. */
@@ -542,9 +572,14 @@ export interface ResolvedMultiSearchPath {
 	targets?: ResolvedSearchTarget[];
 }
 
-export interface ResolvedMultiFindPattern {
+export interface ResolvedFindTarget {
 	basePath: string;
 	globPattern: string;
+	hasGlob: boolean;
+}
+
+export interface ResolvedMultiFindPattern {
+	targets: ResolvedFindTarget[];
 	scopePath: string;
 }
 
@@ -569,6 +604,23 @@ export function parseSearchPath(filePath: string): ParsedSearchPath {
 		basePath: segments.slice(0, firstGlobIndex).join("/"),
 		glob: segments.slice(firstGlobIndex).join("/"),
 	};
+}
+
+/**
+ * Async sibling of {@link parseSearchPath} that prefers literal interpretation
+ * when a path containing glob metacharacters resolves to an existing entry on
+ * disk. Disambiguates Next.js/SvelteKit routes like `apps/[id]/page.tsx` —
+ * without this, `[id]` is parsed as a glob character class and silently
+ * matches nothing.
+ */
+export async function parseSearchPathPreferringLiteral(filePath: string, cwd: string): Promise<ParsedSearchPath> {
+	if (!hasGlobPathChars(filePath) || isInternalUrlPath(filePath)) return parseSearchPath(filePath);
+	try {
+		await fs.promises.stat(resolveToCwd(filePath, cwd));
+		return { basePath: filePath };
+	} catch {
+		return parseSearchPath(filePath);
+	}
 }
 
 // Parse a find pattern into a base directory path and a glob pattern.
@@ -677,7 +729,7 @@ async function resolveSearchPathItems(
 
 	const parsedItems = await Promise.all(
 		pathItems.map(async item => {
-			const parsedPath = parseSearchPath(item);
+			const parsedPath = await parseSearchPathPreferringLiteral(item, cwd);
 			const absoluteBasePath = resolveToCwd(parsedPath.basePath, cwd);
 			const stat = await fs.promises.stat(absoluteBasePath);
 			return { raw: item, parsedPath, absoluteBasePath, stat };
@@ -735,30 +787,22 @@ async function resolveFindPatternItems(
 		return undefined;
 	}
 
-	const parsedItems = await Promise.all(
-		patternItems.map(async item => {
-			const parsedPattern = parseFindPattern(item);
-			const absoluteBasePath = resolveToCwd(parsedPattern.basePath, cwd);
-			const stat = await fs.promises.stat(absoluteBasePath);
-			return { raw: item, parsedPattern, absoluteBasePath, stat };
-		}),
-	);
-
-	const commonBasePath = findCommonBasePath(parsedItems.map(item => item.absoluteBasePath));
-	const combinedPatterns = parsedItems.map(item => {
-		const relativeBasePath = normalizePosixPath(path.relative(commonBasePath, item.absoluteBasePath)) || ".";
-		if (item.parsedPattern.hasGlob) {
-			return joinRelativeGlob(relativeBasePath, item.parsedPattern.globPattern);
-		}
-		if (item.stat.isDirectory()) {
-			return joinRelativeGlob(relativeBasePath, "**/*");
-		}
-		return relativeBasePath === "." ? path.basename(item.absoluteBasePath) : relativeBasePath;
+	// Each path becomes its own walk root. Collapsing to a shared common ancestor
+	// (and filtering with a brace-union glob) would force the walker to traverse
+	// and stat every unrelated sibling under that ancestor — two paths under
+	// $HOME would scan all of $HOME. The find tool fans these targets out in
+	// parallel instead, so every scan stays bounded to exactly one requested path.
+	const targets = patternItems.map(item => {
+		const parsedPattern = parseFindPattern(item);
+		return {
+			basePath: resolveToCwd(parsedPattern.basePath, cwd),
+			globPattern: parsedPattern.globPattern,
+			hasGlob: parsedPattern.hasGlob,
+		};
 	});
 
 	return {
-		basePath: commonBasePath,
-		globPattern: buildBraceUnion(combinedPatterns) ?? "**/*",
+		targets,
 		scopePath: toScopeDisplay(patternItems, cwd),
 	};
 }
@@ -916,6 +960,15 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	if (rawPaths.some(rawPath => rawPath.length === 0)) {
 		throw new ToolError("`paths` must contain non-empty paths or globs");
 	}
+	// External (http/https/ftp/file) URLs are not searchable; route the caller
+	// to `read` instead of letting the path-resolver surface a confusing
+	// "Path not found" for a slash-stripped URL.
+	const externalUrl = rawPaths.find(rawPath => /^(?:https?|ftp|file|ws|wss):\/\//i.test(rawPath));
+	if (externalUrl) {
+		throw new ToolError(
+			`Cannot ${internalUrlAction} external URL: ${externalUrl}. Use \`read\` to fetch web content, then search the returned text.`,
+		);
+	}
 	const internalRouter = InternalUrlRouter.instance();
 	const resolvedPathInputs: string[] = [];
 	const immutableSourcePaths = new Set<string>();
@@ -959,7 +1012,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	let multiTargets: ResolvedSearchTarget[] | undefined;
 	let exactFilePaths: string[] | undefined;
 	if (effectivePaths.length === 1) {
-		const parsedPath = parseSearchPath(effectivePaths[0] ?? ".");
+		const parsedPath = await parseSearchPathPreferringLiteral(effectivePaths[0] ?? ".", cwd);
 		searchPath = resolveToCwd(parsedPath.basePath, cwd);
 		globFilter = parsedPath.glob;
 		scopePath = formatPathRelativeToCwd(searchPath, cwd);

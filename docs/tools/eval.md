@@ -125,20 +125,20 @@ Implemented in `packages/coding-agent/src/eval/js/worker-core.ts`, `packages/cod
 - Persistent worker-backed VM sessions keyed by `js:${sessionId}`
 - `reset: true` calls `resetVmContext(sessionKey)` before the cell executes; reset is destructive for all live runs on that JS session
 - Top-level `await` and bare `return` are supported by wrapping code in an async IIFE when `wrapCode()` sees `await` or `return`
-- Top-level static `import ... from ...` and dynamic `import(...)` calls are routed through `rewriteImports()`, which sends them via `__omp_import__` so the specifier resolves against the session cwd
+- Top-level static `import ... from ...` and dynamic `import(...)` calls are routed through `rewriteImports()`, which sends them via `__omp_import__` so the specifier resolves against the session cwd. Dynamic-import call sites are swapped for a guarded shim (`typeof __omp_import__ === "function" ? __omp_import__ : (s, o) => import(s, o)`) rather than the bare helper identifier: functions handed to puppeteer (`tab.evaluate`, `page.evaluate`, ...) are serialized with `Function.prototype.toString()` and re-evaluated inside the browser page, where the worker-injected helper does not exist, so the shim falls back to native dynamic import there
 - Module cache is busted for **local** imports between cells so edits to source files are picked up without restarting the runtime. `__omp_import__` deletes `require.cache[absPath]` before re-importing whenever the original specifier is a filesystem path: relative (`./x`, `../x`, `.`, `..`), POSIX-absolute (`/...`), home-prefixed (`~/...`), or Windows drive-letter (`C:\...` / `C:/...`). Bare specifiers (`react`, `lodash/x`) and URL/scheme specifiers (`node:fs`, `file://...`, `https://...`) are left in cache so package identity stays stable across cells. The cache-bust only fires when the resolved target is an absolute path — unresolved bare-package fallbacks (`resolveImportSpecifier()` returning the original specifier) skip it.
 - The prelude installs globals:
   - `display`, `print`
   - `read`, `write`, `append`, `sort`, `uniq`, `counter`, `diff`, `tree`, `env`, `output`
   - `tool.<name>(args)` proxy for arbitrary session tool calls
-  - `llm(prompt, opts?)` for oneshot, stateless LLM calls (see _Oneshot LLM helper_ below)
+  - `completion(prompt, opts?)` for oneshot, stateless model calls (see _Oneshot completion helper_ below)
   - `agent(prompt, opts?)` for a single subagent call, plus `parallel()` / `pipeline()` bounded-pool helpers (see _Subagent helper_ below)
 - JS helpers that touch the host/runtime boundary are async and `await`able; pure text helpers (`sort`, `uniq`, `counter`) return synchronously but may still be safely awaited.
 - JS helper signatures use a trailing options object rather than Python keyword arguments:
   - `await read(path, { offset?, limit? })`
   - `await tree(path = ".", { maxDepth?, hidden? })`
   - `sort(text, { reverse?, unique? })`, `uniq(text, { count? })`, `counter(items, { limit?, reverse? })`
-  - `await agent(prompt, { agentType?, model?, context?, label?, schema? })`
+  - `await agent(prompt, { agentType?, model?, label?, schema? })`
   - `await parallel([() => agent("a"), () => agent("b")])`
   - `await pipeline(items, stage1, stage2)`
 - `display(value)` behavior:
@@ -161,7 +161,7 @@ Implemented in `packages/coding-agent/src/eval/py/executor.ts`, `packages/coding
   - initialize cwd / env / `sys.path`
   - execute `PYTHON_PRELUDE`
 - Python cells run in the runner's persistent asyncio event loop, so top-level `await` works; the prompt warns not to use `asyncio.run(...)`
-- The Python prelude defines helpers with the same surface as JS where practical, including `tool.<name>(args)`, `llm(...)`, and `agent(...)` through a per-run loopback bridge
+- The Python prelude defines helpers with the same surface as JS where practical, including `tool.<name>(args)`, `completion(...)`, and `agent(...)` through a per-run loopback bridge
 - Synchronous statement blocks run in the default executor with ContextVar state copied in; the GIL still serializes bytecode execution, but awaited regions can interleave with sibling cells
 - Kernel `display_data` / `execute_result` messages map to:
   - `application/x-omp-status` → status event
@@ -172,13 +172,13 @@ Implemented in `packages/coding-agent/src/eval/py/executor.ts`, `packages/coding
   - `text/html` → HTML converted to markdown with `htmlToBasicMarkdown()`
 - Interactive stdin is rejected: `input_request` sends an empty reply, marks `stdinRequested`, and the executor returns exit code `1`
 
-### Oneshot LLM helper (`llm`)
+### Oneshot completion helper (`completion`)
 
-Both runtimes expose `llm()` — a single stateless completion against a model tier. It is intentionally minimal: no conversation history, no agent-visible tools, pure text in / text (or object) out. Implemented host-side in `packages/coding-agent/src/eval/llm-bridge.ts` and routed through the existing tool bridge under the reserved name `__llm__`.
+Both runtimes expose `completion()` — a single stateless completion against a model tier. It is intentionally minimal: no conversation history, no agent-visible tools, pure text in / text (or object) out. Implemented host-side in `packages/coding-agent/src/eval/completion-bridge.ts` and routed through the existing tool bridge under the reserved name `__completion__`.
 
 - Signatures:
-  - JS: `await llm(prompt, { model?, system?, schema? })`
-  - Python: `llm(prompt, *, model="default", system=None, schema=None)`
+  - JS: `await completion(prompt, { model?, system?, schema? })`
+  - Python: `completion(prompt, *, model="default", system=None, schema=None)`
 - `model` selects a tier (default `"default"`):
   - `"smol"` → `pi/smol` role (fast / cheap)
   - `"default"` → the session's active model, falling back to the `pi/default` role
@@ -192,11 +192,11 @@ Both runtimes expose `llm()` — a single stateless completion against a model t
 Both runtimes expose `agent()` — a single subagent invocation routed through `packages/coding-agent/src/eval/agent-bridge.ts` into the same `runSubprocess(...)` path used by the `task` tool. It uses the current eval session's spawn policy and inherits the parent eval executor id, so parent and subagent code share JS/Python runtime state.
 
 - Signatures:
-  - JS: `await agent(prompt, { agentType?, model?, context?, label?, schema? })`
-  - Python: `agent(prompt, *, agent_type="task", model=None, context=None, label=None, schema=None)`
+  - JS: `await agent(prompt, { agentType?, model?, label?, schema? })`
+  - Python: `agent(prompt, *, agent_type="task", model=None, label=None, schema=None)`
 - `agentType` / `agent_type` defaults to the bundled `task` agent and resolves through normal agent discovery, so project and user agents work.
 - `model` overrides the selected agent's model. Without it, normal per-agent settings and the agent frontmatter model apply.
-- `context` supplies shared background; `label` controls the `agent://<id>` output label prefix.
+- Shared background is passed via files: write a `local://` file and reference it in the prompt. `label` controls the `agent://<id>` output label prefix.
 - `schema` passes a JSON Schema to the subagent structured-output path. When present, the helper parses the final JSON text and returns an object.
 - Spawn restrictions use `session.getSessionSpawns()` exactly like the `task` tool. Eval-driven subagent recursion is capped at depth 3.
 - JS and Python both expose `parallel(thunks)` and `pipeline(items, ...stages)`; both use a bounded async/threaded pool whose width tracks the `task.maxConcurrency` setting (the same ceiling the `task` tool uses; `0` = run every item at once), preserve item order, and propagate rejections. The width is fetched live from the host via the `__concurrency__` bridge, so the helpers no longer take a `concurrency` argument.
