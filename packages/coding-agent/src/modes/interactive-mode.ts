@@ -14,7 +14,14 @@ import {
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import type { Component, EditorTheme, LoaderMessageColorFn, OverlayHandle, SlashCommand } from "@oh-my-pi/pi-tui";
+import type {
+	Component,
+	EditorTheme,
+	LoaderMessageColorFn,
+	NativeScrollbackLiveRegion,
+	OverlayHandle,
+	SlashCommand,
+} from "@oh-my-pi/pi-tui";
 import {
 	Container,
 	clearRenderCache,
@@ -79,8 +86,10 @@ import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES } from "../slash-commands/builtin-
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { formatTaskId } from "../task/render";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve";
 import { formatPhaseDisplayName, selectStickyTodoWindow, todoMatchesAnyDescription } from "../tools/todo";
@@ -125,6 +134,7 @@ import {
 	parseLoopLimitArgs,
 } from "./loop-limit";
 import { OAuthManualInputManager } from "./oauth-manual-input";
+import type { ObservableSession } from "./session-observer-registry";
 import { SessionObserverRegistry } from "./session-observer-registry";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { interruptHint } from "./shared";
@@ -257,6 +267,54 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 }
 
+/**
+ * Hosts the working loader and transient status rows. While anything is
+ * mounted, every row is live: report a seam at 0 so the engine never commits
+ * a still-animating loader to native scrollback (stale `Working…` rows would
+ * otherwise pile up above the live one). The transcript's own seam, when
+ * present, sits higher and wins (topmost-seam merge in TUI.render).
+ */
+class StatusContainer extends Container implements NativeScrollbackLiveRegion {
+	getNativeScrollbackLiveRegionStart(): number | undefined {
+		return this.children.length > 0 ? 0 : undefined;
+	}
+}
+
+/**
+ * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
+ * one hooked row per running agent in the same `Id: description` shape the
+ * inline task rows use (muted task preview when no description was given).
+ * Returns an empty array when nothing is running so the container can clear.
+ */
+export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
+	const running = sessions.filter(session => session.kind === "subagent" && session.status === "active");
+	if (running.length === 0) return [];
+
+	const indent = "  ";
+	const hook = theme.tree.hook;
+	const dot = theme.styledSymbol("status.done", "accent");
+	const lines = ["", indent + theme.bold(theme.fg("accent", "Subagents"))];
+	running.forEach((session, index) => {
+		const prefix = `${indent}${index === 0 ? hook : " "} `;
+		const displayId = formatTaskId(session.id);
+		let line = `${prefix}${dot} ${theme.fg("accent", theme.bold(displayId))}`;
+		const description = session.description?.trim() || session.progress?.description?.trim();
+		if (description) {
+			const budget = Math.max(TRUNCATE_LENGTHS.SHORT, columns - visibleWidth(prefix) - visibleWidth(displayId) - 6);
+			line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(replaceTabs(description), budget))}`;
+		} else {
+			// No spawn description: fall back to a muted task preview, same as
+			// the inline task rows when a row has no label.
+			const taskPreview = session.progress?.task?.trim();
+			if (taskPreview) {
+				line += ` ${theme.fg("muted", truncateToWidth(replaceTabs(taskPreview), TRUNCATE_LENGTHS.SHORT))}`;
+			}
+		}
+		lines.push(line);
+	});
+	return lines;
+}
+
 export class InteractiveMode implements InteractiveModeContext {
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -271,6 +329,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	todoContainer: Container;
+	subagentContainer: Container;
 	btwContainer: Container;
 	omfgContainer: Container;
 	errorBannerContainer: Container;
@@ -418,8 +477,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTextSizing(settings.get("tui.textSizing") && TERMINAL.textSizing);
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new Container();
-		this.statusContainer = new Container();
+		this.statusContainer = new StatusContainer();
 		this.todoContainer = new Container();
+		this.subagentContainer = new Container();
 		this.btwContainer = new Container();
 		this.omfgContainer = new Container();
 		this.errorBannerContainer = new Container();
@@ -496,8 +556,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	playWelcomeIntro(): void {
-		this.#welcomeComponent?.playIntro(() => this.ui.requestRender());
+		const welcome = this.#welcomeComponent;
+		// Component-scoped: the intro only mutates the welcome box's own rows,
+		// so a resumed long transcript is not re-walked per animation frame.
+		welcome?.playIntro(() => this.ui.requestComponentRender(welcome));
 	}
+
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
 
@@ -582,6 +646,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
 		this.ui.addChild(this.todoContainer);
+		this.ui.addChild(this.subagentContainer);
 		this.ui.addChild(this.btwContainer);
 		this.ui.addChild(this.omfgContainer);
 		this.ui.addChild(this.errorBannerContainer);
@@ -608,6 +673,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#reconcileTodosWithSubagents();
 			this.#syncTodoAutoClearTimer();
 			this.#renderTodoList();
+			this.#renderSubagentList();
 			this.ui.requestRender();
 		});
 
@@ -1050,6 +1116,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			separator: settings.get("statusLine.separator"),
 			showHookStatus: settings.get("statusLine.showHookStatus"),
 			sessionAccent: settings.get("statusLine.sessionAccent"),
+			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 		});
 	}
@@ -1068,7 +1135,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		} else {
 			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
 			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
-			const hex = sessionName ? getSessionAccentHex(sessionName, theme.accentSurfaceLuminance) : undefined;
+			const hex = sessionName
+				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+				: undefined;
 			const ansi = getSessionAccentAnsi(hex);
 			if (ansi) {
 				this.editor.borderColor = (str: string) => `${ansi}${str}\x1b[39m`;
@@ -1253,6 +1322,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 
 		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
+	}
+
+	/**
+	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
+	 * editor. Driven entirely by observer-registry change events, so rows appear
+	 * on spawn and the whole block clears itself once the last subagent leaves
+	 * the "active" state.
+	 */
+	#renderSubagentList(): void {
+		this.subagentContainer.clear();
+		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
+		if (lines.length === 0) return;
+		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}
 
 	async #loadTodoList(): Promise<void> {
@@ -1780,6 +1862,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				onPick: choice => finish(choice),
 				onCancel: () => finish(undefined),
 				onExternalEditor: dialogOptions?.onExternalEditor,
+				onAnnotationExternalEditor: (draft, commit) => void this.#openPlanAnnotationInExternalEditor(draft, commit),
 				onPlanEdited: dialogOptions?.onPlanEdited,
 				onFeedbackChange: dialogOptions?.onFeedbackChange,
 			},
@@ -1882,6 +1965,37 @@ export class InteractiveMode implements InteractiveModeContext {
 				await Bun.write(resolvedPath, result);
 				this.#planReviewOverlay?.setPlanContent(result);
 				this.showStatus("Plan updated in external editor.");
+			}
+		} catch (error) {
+			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			if (ttyHandle) {
+				await ttyHandle.close();
+			}
+			this.ui.start();
+			this.ui.requestRender(true);
+		}
+	}
+
+	async #openPlanAnnotationInExternalEditor(draft: string, commit: (text: string | null) => void): Promise<void> {
+		const editorCmd = getEditorCommand();
+		if (!editorCmd) {
+			this.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
+			return;
+		}
+
+		let ttyHandle: fs.FileHandle | null = null;
+		try {
+			ttyHandle = await this.#openEditorTerminalHandle();
+			this.ui.stop();
+
+			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = ttyHandle
+				? [ttyHandle.fd, ttyHandle.fd, ttyHandle.fd]
+				: ["inherit", "inherit", "inherit"];
+
+			const result = await openInEditor(editorCmd, draft, { extension: ".md", stdio });
+			if (result !== null) {
+				commit(result);
 			}
 		} catch (error) {
 			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
@@ -2766,7 +2880,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!key.sessionAccentEnabled || !key.sessionName) {
 			return this.#cacheWorkingMessageAccent(key, undefined);
 		}
-		const hex = getSessionAccentHex(key.sessionName, key.accentSurfaceLuminance);
+		const hex = getSessionAccentHex(key.sessionName, theme.getMajorThemeColorHexes(), key.accentSurfaceLuminance);
 		const main = getSessionAccentAnsi(hex);
 		const dim = getSessionAccentAnsi(adjustHsv(hex, { s: 0.55, v: 0.65 }));
 		return this.#cacheWorkingMessageAccent(key, main && dim ? { main, dim } : undefined);
@@ -3036,7 +3150,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#voiceAnimationInterval = setInterval(() => {
 			this.#voiceHue = (this.#voiceHue + 8) % 360;
 			this.#updateMicIcon();
-			this.ui.requestRender();
+			// Component-scoped: the hue sweep only recolors the editor's cursor
+			// glyph, so the transcript subtree is reused per animation frame.
+			this.ui.requestComponentRender(this.editor);
 		}, 60);
 	}
 
@@ -3172,6 +3288,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
 		return this.#selectorController.showOAuthSelector(mode, providerId);
+	}
+
+	showResetUsageSelector(): Promise<void> {
+		return this.#selectorController.showResetUsageSelector();
 	}
 
 	showProviderSetup(): Promise<void> {
