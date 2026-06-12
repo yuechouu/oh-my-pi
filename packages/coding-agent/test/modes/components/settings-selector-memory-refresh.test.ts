@@ -128,7 +128,12 @@ describe("SettingsSelectorComponent memory tab", () => {
 		comp.handleInput("b");
 		const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
 		const searching = comp.render(120).map(strip).join("\n");
-		expect(searching).toContain("b▌");
+		const banner =
+			comp
+				.render(120)
+				.map(strip)
+				.find(line => /\d+ match/.test(line)) ?? "";
+		expect(banner).toContain(" b ");
 		expect(searching).toMatch(/\d+ match/);
 
 		// First Escape exits search mode without closing the panel.
@@ -138,6 +143,47 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 		comp.handleInput("\x1b");
 		expect(cancelCount).toBe(1);
+	});
+
+	it("puts the exact global settings search hit before incidental matches", () => {
+		const comp = createSelector();
+		for (const ch of "image provider") comp.handleInput(ch);
+
+		const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
+		const rendered = comp.render(120).map(strip).join("\n");
+		const providersIndex = rendered.indexOf("Providers");
+		const appearanceIndex = rendered.indexOf("Appearance");
+
+		expect(rendered).toContain("Image Provider");
+		expect(rendered).not.toContain("Include Model in Prompt");
+		expect(rendered).not.toContain("Service Tier");
+		expect(providersIndex).toBeGreaterThanOrEqual(0);
+		if (appearanceIndex >= 0) {
+			expect(appearanceIndex).toBeGreaterThan(providersIndex);
+		}
+	});
+
+	it("supports editor hotkeys in the global search bar", () => {
+		const comp = createSelector();
+		const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
+		const banner = (): string =>
+			comp
+				.render(120)
+				.map(strip)
+				.find(line => /\d+ match/.test(line)) ?? "";
+
+		// alt+backspace deletes the trailing word from the query.
+		for (const ch of "image provider") comp.handleInput(ch);
+		comp.handleInput("\x1b\x7f");
+		expect(banner()).toContain("image");
+		expect(banner()).not.toContain("provider");
+
+		// Arrow keys move the cursor; typing inserts mid-query instead of appending.
+		comp.handleInput("\x15"); // ctrl+u clears the rest of the query
+		for (const ch of "model") comp.handleInput(ch);
+		for (let i = 0; i < 5; i++) comp.handleInput("\x1b[D");
+		comp.handleInput("x");
+		expect(banner()).toContain("xmodel");
 	});
 
 	it("delegates Escape to an open settings submenu before closing the selector", () => {

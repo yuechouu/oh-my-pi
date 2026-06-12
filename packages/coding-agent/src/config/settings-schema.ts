@@ -1572,14 +1572,28 @@ export const SETTINGS_SCHEMA = {
 
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
-		type: "boolean",
-		default: false,
+		type: "enum",
+		values: ["none", "agents-md", "all"] as const,
+		default: "none",
 		ui: {
 			tab: "context",
 			group: "Experimental",
 			label: "Snapcompact System Prompt",
 			description:
-				"Experimental: render the system prompt as dense PNG image(s) and attach to the first user message (vision models only). Saves tokens; loses system-prompt prompt caching.",
+				"Experimental: render selected system prompt text as dense PNG image(s) and attach to the first user message (vision models only). Saves tokens; loses prompt caching for imaged text.",
+			options: [
+				{ value: "none", label: "None", description: "Keep the system prompt as text." },
+				{
+					value: "agents-md",
+					label: "AGENTS.md",
+					description: "Only move loaded context-file instructions to images, when that saves tokens.",
+				},
+				{
+					value: "all",
+					label: "All",
+					description: "Move the full system prompt to images, when that saves tokens.",
+				},
+			],
 		},
 	},
 
@@ -3617,6 +3631,39 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	// Codex saved rate-limit resets (auto-redeem)
+	"codexResets.autoRedeem": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Auto-Redeem Saved Resets",
+			description:
+				"When a turn is blocked by the Codex weekly limit on the active account and no other account is available, automatically spend one saved rate-limit reset (ChatGPT 'save rate limit resets'). Conservative: never fires for 5-hour-only or Spark limits, near a natural reset, or twice for the same block. Requires retries enabled.",
+		},
+	},
+	"codexResets.minBlockedMinutes": {
+		type: "number",
+		default: 60,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Auto-Redeem Min Block",
+			description:
+				"Only auto-redeem when the natural weekly reset is at least this many minutes away (don't spend a ~30-day credit to save a short wait).",
+		},
+	},
+	"codexResets.keepCredits": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Auto-Redeem Reserve",
+			description: "Never auto-spend below this many saved resets (0 = the last credit may be spent automatically).",
+		},
+	},
 	"provider.appendOnlyContext": {
 		type: "enum",
 		values: ["auto", "on", "off"] as const,
@@ -4005,6 +4052,11 @@ export interface ShellMinimizerSettings {
 	sourceOutlineLevel: "default" | "aggressive";
 	legacyFilters: boolean | undefined;
 }
+export interface CodexResetsSettings {
+	autoRedeem: boolean;
+	minBlockedMinutes: number;
+	keepCredits: number;
+}
 
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
@@ -4024,6 +4076,7 @@ export interface GroupTypeMap {
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
+	codexResets: CodexResetsSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;

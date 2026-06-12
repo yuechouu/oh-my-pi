@@ -715,7 +715,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.debug": "\uEAD8",
 	"tool.mcp": "\uEB2D",
 	"tool.job": "\uEBA2",
-	"tool.task": "\uEA7E",
+	"tool.task": "\uf4a0",
 	"tool.todo": "\uEAB3",
 	"tool.memory": "\uEACE",
 	"tool.ask": "\uEAC7",
@@ -2762,7 +2762,7 @@ export function getSettingsListTheme(): SettingsListTheme {
 		label: (text: string, selected: boolean, changed: boolean) =>
 			changed ? theme.fg("statusLineGitDirty", text) : selected ? theme.fg("accent", text) : text,
 		value: (text: string, selected: boolean, changed: boolean) =>
-			selected ? theme.fg("accent", text) : changed ? theme.fg("statusLineGitDirty", text) : theme.fg("muted", text),
+			changed ? theme.fg("statusLineGitDirty", text) : selected ? theme.fg("accent", text) : theme.fg("muted", text),
 		description: (text: string) => theme.fg("dim", text),
 		cursor: theme.fg("accent", `${theme.nav.cursor} `),
 		hint: (text: string) => theme.fg("dim", text),

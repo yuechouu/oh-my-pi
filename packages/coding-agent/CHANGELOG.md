@@ -2,6 +2,59 @@
 
 ## [Unreleased]
 
+## [15.11.6] - 2026-06-12
+
+
+### Changed
+
+- Renamed the saved Codex reset command from `/reset-usage` to `/usage reset` and added `/usage show` as an explicit alias for plain `/usage`.
+
+### Fixed
+
+- Fixed the Subagents HUD order so progress updates no longer move active rows; batched subagents keep their task order.
+- Fixed `/settings` dirty-value highlighting so changed values stay orange while the row has keyboard focus.
+
+## [15.11.5] - 2026-06-12
+
+### Added
+
+- Added `codexResets.autoRedeem`, `codexResets.minBlockedMinutes`, and `codexResets.keepCredits` settings so Codex users can opt in to automatic spending of saved rate-limit resets
+- Added automatic Codex reset redemption flow so a blocked weekly usage-limit request can be retried immediately after consuming a saved reset when auto-redeem is enabled
+- Added `--history` mode to `omp usage` to show recorded usage-limit history instead of a single live snapshot
+- Added `--days` (`-d`) support for `omp usage --history` to control the history window (default 7 days)
+- Added historical usage output for `omp usage --history`, including per-limit sparklines with latest and peak percentages
+- Added `--json` support in `omp usage --history` to emit timestamped usage-history snapshot data
+- Added guidance and exit code 1 when no usage history is available for the selected window
+- Added an anchored Subagents HUD above the editor (next to the Todos block) listing every running subagent as `Id: description`; rows appear on spawn and the block clears itself when the last subagent finishes
+- Added `/reset-usage` command to spend a saved Codex rate-limit reset by running `/reset-usage <active|account id|email>`, with a TUI selector flow for interactive reset redemption
+- Added `snapcompact.systemPrompt` enum modes `none`, `agents-md`, and `all`, so users can disable system-prompt imaging, image only loaded AGENTS.md/context-file instruction sections, or image the full system prompt
+- Added `agents-md` snapcompact mode that rasterizes AGENTS.md-style context sections from the system prompt into frames and appends them to the first user message
+- `/context` (TUI panel and ACP report) now shows estimated snapcompact wire savings when `snapcompact.systemPrompt` or `snapcompact.toolResults` is enabled — per-feature text → frames token deltas, the reason a swap does not apply (savings margin, image budget, or text-only model), and the estimated size of the next request. The estimate and the live provider-request transform share one planner (`planInlineSwaps`) so displayed numbers cannot drift from wire behavior.
+- Added `/debug dump-request` and `/debug next-request` as aliases for `/debug dump-next-request` when arming a one-shot AI provider request dump
+- Added `/debug dump-next-request <path>` to dump the next AI provider HTTP request JSON to a chosen file.
+
+### Changed
+
+- Changed usage views (`/usage` reports, status summaries, and account headers) to show available saved Codex rate-limit resets and point to `/reset-usage` for spending them
+- Changed `/context` system-prompt savings lines to show the scope as `AGENTS.md` or `all`, so savings estimates now indicate whether imaging applied only to context-file instructions or the entire prompt
+- Changed `/debug` handling in interactive mode so `/debug` with arguments now executes the requested debug subcommand instead of always opening the debug selector
+- Changed `/debug dump-next-request` path handling to expand `~` and resolve relative paths against the current working directory
+- Changed the task tool's TUI block: the header now shows the task dispatch glyph (`tool.task`) while agents are in flight instead of a spinner (async spawns return immediately, so a spinner misread the call as blocking), and per-agent rows use one static dot for every state — completed rows keep the same dot and settle from accent to the plain foreground color instead of switching to a different status glyph
+- Compressed the `eval`, `browser`, `read`, and `irc` tool prompts (6156 → 4932 tokens o200k, −20%): deduplicated claims across sections, tightened helper reference descriptions, trimmed redundant examples; input grammar, examples, and template conditionals (`py`/`js`/`spawns`, read display modes) unchanged
+- Changed the Nerd Font `tool.task` icon to the Octicons tasklist glyph.
+
+### Fixed
+
+- Fixed settings search to rank matching tabs by relevance so exact matches appear before incidental matches
+- Fixed the `/settings` search bar ignoring regular editor hotkeys: the query is now a real single-line input with cursor movement (`←/→`, word jumps, Home/End), word deletion (`Alt+Backspace`, `Ctrl+W`), kill/yank, undo, and paste support
+- Fixed snapcompact `toolResults` imaging confusing models into reporting tool malfunctions: the note prepended to rasterized tool results now tells the model the result is in the PNG frame(s) below and that the image delivery is deliberate, not a tool error, instead of the bare `[Rasterized]` marker
+- Fixed tool-call boxes rendering "inside themselves" after slow tool runs: a pending collapsed preview that sat byte-static past the stable-prefix window (e.g. an edit's tail-window diff while the apply + LSP pass ran) had its settled head committed to native scrollback, and the result render then stranded that stale call-box fragment above the final block. Pending collapsed tool previews are now provisional (`isTranscriptBlockCommitStable`) and never enter scrollback mid-run; expanded top-anchored streams keep committing mid-stream
+- Fixed the higher-level Responses retry classifier to recognize OpenAI Zero Data Retention rejections (`Previous response cannot be used for this organization due to Zero Data Retention`) as stale-replay errors. The provider-level fix in `@oh-my-pi/pi-ai` covers the common case in a single turn; this layer additionally guarantees that any ZDR error that still bubbles up resets the Responses session and retries at zero backoff instead of falling back to a different model ([#2341](https://github.com/can1357/oh-my-pi/issues/2341)).
+
+### Removed
+
+- Removed the todo task notes feature: `op: "note"`, the `text` payload, task `notes` state, markdown note blocks, and note rendering are no longer supported.
+
 ## [15.11.4] - 2026-06-12
 
 ### Added

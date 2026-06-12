@@ -27,8 +27,14 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import type { ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import { type SessionInfo, SessionManager } from "../../session/session-manager";
 import { FileSessionStorage } from "../../session/session-storage";
+import {
+	describeRedeemOutcome,
+	type ResetUsageAccount,
+	toResetUsageAccounts,
+} from "../../slash-commands/helpers/reset-usage";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import {
 	isImageProviderPreference,
@@ -48,6 +54,7 @@ import { HistorySearchComponent } from "../components/history-search";
 import { ModelSelectorComponent } from "../components/model-selector";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
+import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
@@ -1089,6 +1096,67 @@ export class SelectorController {
 			);
 			return { component: selector, focus: selector };
 		});
+	}
+
+	async showResetUsageSelector(): Promise<void> {
+		const session = this.ctx.session;
+		this.ctx.showStatus("Checking saved rate-limit resets…", { dim: true });
+		let statuses: Awaited<ReturnType<typeof session.listResetCredits>>;
+		try {
+			statuses = await session.listResetCredits();
+		} catch (error) {
+			this.ctx.showError(`Could not load saved resets: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		const accounts = toResetUsageAccounts(statuses);
+		if (accounts.length === 0) {
+			this.ctx.showStatus("No Codex accounts found. Use /login to add one.");
+			return;
+		}
+		if (!accounts.some(account => account.availableCount > 0)) {
+			this.ctx.showStatus(
+				accounts.some(account => account.error)
+					? "No saved resets available — some accounts couldn't be reached (try /login)."
+					: "No saved rate-limit resets available to spend right now.",
+			);
+			return;
+		}
+		this.showSelector(done => {
+			const selector = new ResetUsageSelectorComponent(
+				accounts,
+				account => {
+					done();
+					void this.#redeemReset(account);
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	async #redeemReset(account: ResetUsageAccount): Promise<void> {
+		this.ctx.showStatus(`Spending 1 saved reset for ${account.label}…`, { dim: true });
+		let outcome: ResetCreditRedeemOutcome;
+		try {
+			outcome = await this.ctx.session.redeemResetCredit(account.target);
+		} catch (error) {
+			this.ctx.showError(
+				`Reset failed for ${account.label}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		const message = describeRedeemOutcome(outcome, account.label);
+		if (outcome.ok) {
+			this.ctx.showStatus(message);
+			// Refresh the status-line usage so the freshly-reset window shows.
+			this.ctx.statusLine.invalidate();
+			this.ctx.ui.requestRender();
+		} else {
+			this.ctx.showWarning(message);
+		}
 	}
 
 	async showDebugSelector(): Promise<void> {

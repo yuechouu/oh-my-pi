@@ -1,7 +1,11 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { Context, ImageContent, Message, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { SnapcompactInlineTransformer } from "@oh-my-pi/pi-coding-agent/session/snapcompact-inline";
+import {
+	estimateInlineSavings,
+	planInlineSwaps,
+	SnapcompactInlineTransformer,
+} from "@oh-my-pi/pi-coding-agent/session/snapcompact-inline";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 /**
@@ -75,13 +79,13 @@ function imageCount(context: Context): number {
 
 describe("SnapcompactInlineTransformer", () => {
 	it("is a no-op for text-only models", () => {
-		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: true, renderToolResults: true });
+		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "all", renderToolResults: true });
 		const context = makeContext();
 		expect(transformer.transform(context, makeModel({ input: ["text"] }))).toBe(context);
 	});
 
 	it("images large historical tool results, keeping small and most-recent ones as text", () => {
-		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: false, renderToolResults: true });
+		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "none", renderToolResults: true });
 		const context = makeContext();
 		const result = transformer.transform(context, makeModel());
 
@@ -105,7 +109,7 @@ describe("SnapcompactInlineTransformer", () => {
 	});
 
 	it("never mutates the input context (persisted history shares these references)", () => {
-		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: true, renderToolResults: true });
+		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "all", renderToolResults: true });
 		const context = makeContext();
 		const originalMessages = context.messages;
 		const originalSystemPrompt = context.systemPrompt;
@@ -124,7 +128,7 @@ describe("SnapcompactInlineTransformer", () => {
 	});
 
 	it("leaves tool results that already carry images untouched", () => {
-		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: false, renderToolResults: true });
+		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "none", renderToolResults: true });
 		const withImage: ToolResultMessage = {
 			...toolResult("call_img", LARGE),
 			content: [
@@ -140,7 +144,7 @@ describe("SnapcompactInlineTransformer", () => {
 	});
 
 	it("replaces a large system prompt with a stub and rides frames on the first user message", () => {
-		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: true, renderToolResults: false });
+		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "all", renderToolResults: false });
 		const longPrompt = denseText(3000);
 		const context: Context = {
 			systemPrompt: [longPrompt],
@@ -160,8 +164,36 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(carrier.content[carrier.content.length - 1]).toEqual({ type: "text", text: "do the thing" });
 	});
 
+	it("moves only loaded context-file instructions when AGENTS.md mode is selected", () => {
+		const transformer = new SnapcompactInlineTransformer({
+			renderSystemPrompt: "agents-md",
+			renderToolResults: false,
+		});
+		const longContext = denseText(3000);
+		const context: Context = {
+			systemPrompt: [
+				`Core instructions.\n\n<context>\nYou MUST follow the context files below for all tasks:\n<file path="AGENTS.md">\n${longContext}\n</file>\n</context>\n\nToday is 2026-06-12.`,
+				"Final system block.",
+			],
+			messages: [userMessage("do the thing")],
+		};
+		const result = transformer.transform(context, makeModel());
+
+		expect(result.systemPrompt).toHaveLength(2);
+		expect(result.systemPrompt![0]).toContain("Core instructions.");
+		expect(result.systemPrompt![0]).toContain("Today is 2026-06-12.");
+		expect(result.systemPrompt![0]).toContain("Loaded context-file instructions were moved");
+		expect(result.systemPrompt![0]).not.toContain(longContext);
+		expect(result.systemPrompt![1]).toBe("Final system block.");
+
+		const carrier = result.messages[0] as { content: (TextContent | ImageContent)[] };
+		expect((carrier.content[0] as TextContent).text).toContain("CONTEXT FILE INSTRUCTIONS");
+		expect(carrier.content.some(block => block.type === "image")).toBe(true);
+		expect(carrier.content[carrier.content.length - 1]).toEqual({ type: "text", text: "do the thing" });
+	});
+
 	it("keeps a small system prompt as text and skips when no user message exists", () => {
-		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: true, renderToolResults: false });
+		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "all", renderToolResults: false });
 		const small: Context = { systemPrompt: ["Be terse."], messages: [userMessage("hi")] };
 		expect(transformer.transform(small, makeModel())).toBe(small);
 
@@ -170,7 +202,7 @@ describe("SnapcompactInlineTransformer", () => {
 	});
 
 	it("never rasterizes tool results under the 3k-token floor, even when frames are cheaper", () => {
-		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: false, renderToolResults: true });
+		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "none", renderToolResults: true });
 		// ~1.5k tokens: the google shape estimates 1 frame ≈ 1100 tokens, so the
 		// savings gate alone would rasterize this — the floor must keep it text.
 		const midsize = denseText(500);
@@ -182,7 +214,7 @@ describe("SnapcompactInlineTransformer", () => {
 	});
 
 	it("respects the per-provider image budget for unknown providers", () => {
-		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: false, renderToolResults: true });
+		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "none", renderToolResults: true });
 		const context: Context = {
 			messages: [
 				userMessage("go"),
@@ -203,7 +235,7 @@ describe("SnapcompactInlineTransformer", () => {
 	it("caches renders across turns: identical input does not re-rasterize", () => {
 		const spy = spyOn(snapcompact, "renderMany");
 		try {
-			const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: true, renderToolResults: true });
+			const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "all", renderToolResults: true });
 			const context = makeContext();
 			const model = makeModel();
 
@@ -223,5 +255,180 @@ describe("SnapcompactInlineTransformer", () => {
 		} finally {
 			spy.mockRestore();
 		}
+	});
+});
+
+describe("planInlineSwaps", () => {
+	const shape = snapcompact.resolveShape("anthropic-messages");
+	const toolOnly = { renderSystemPrompt: "none" as const, renderToolResults: true };
+	const promptOnly = { renderSystemPrompt: "all" as const, renderToolResults: false };
+
+	it("never swaps the most recent tool result", () => {
+		const plan = planInlineSwaps({
+			options: toolOnly,
+			shape,
+			budget: 90,
+			toolResults: [
+				{ id: "a", textTokens: 10000, frames: 2, hasImage: false },
+				{ id: "z", textTokens: 10000, frames: 2, hasImage: false },
+			],
+			systemPrompt: undefined,
+			hasUserMessage: true,
+		});
+		expect(plan.toolResults.map(swap => swap.id)).toEqual(["a"]);
+	});
+
+	it("skips image-carrying, below-floor, and below-margin candidates", () => {
+		const plan = planInlineSwaps({
+			options: toolOnly,
+			shape,
+			budget: 90,
+			toolResults: [
+				{ id: "img", textTokens: 0, frames: 0, hasImage: true },
+				{ id: "small", textTokens: 2999, frames: 1, hasImage: false },
+				// 2 frames ≈ 6600 image tokens > 7000 * 0.9 — margin gate rejects.
+				{ id: "margin", textTokens: 7000, frames: 2, hasImage: false },
+				{ id: "ok", textTokens: 10000, frames: 2, hasImage: false },
+				{ id: "last", textTokens: 10000, frames: 2, hasImage: false },
+			],
+			systemPrompt: undefined,
+			hasUserMessage: true,
+		});
+		expect(plan.toolResults.map(swap => swap.id)).toEqual(["ok"]);
+	});
+
+	it("skips candidates over the remaining budget but keeps trying smaller ones", () => {
+		const plan = planInlineSwaps({
+			options: toolOnly,
+			shape,
+			budget: 3,
+			toolResults: [
+				{ id: "a", textTokens: 10000, frames: 2, hasImage: false },
+				{ id: "b", textTokens: 10000, frames: 2, hasImage: false },
+				{ id: "c", textTokens: 5000, frames: 1, hasImage: false },
+				{ id: "last", textTokens: 10000, frames: 2, hasImage: false },
+			],
+			systemPrompt: undefined,
+			hasUserMessage: true,
+		});
+		expect(plan.toolResults.map(swap => swap.id)).toEqual(["a", "c"]);
+	});
+
+	it("gives the system prompt only the budget tool results left over", () => {
+		const input = {
+			options: { renderSystemPrompt: "all" as const, renderToolResults: true },
+			shape,
+			budget: 2,
+			toolResults: [
+				{ id: "a", textTokens: 10000, frames: 2, hasImage: false },
+				{ id: "last", textTokens: 10000, frames: 2, hasImage: false },
+			],
+			systemPrompt: { textTokens: 10000, frames: 2 },
+			hasUserMessage: true,
+		};
+		const contested = planInlineSwaps(input);
+		expect(contested.toolResults.map(swap => swap.id)).toEqual(["a"]);
+		expect(contested.systemPrompt).toBeUndefined();
+
+		const uncontested = planInlineSwaps({ ...input, options: promptOnly });
+		expect(uncontested.toolResults).toEqual([]);
+		expect(uncontested.systemPrompt).toEqual({ textTokens: 10000, frames: 2 });
+	});
+
+	it("gates the system prompt on frame cap, savings margin, and a carrier user message", () => {
+		const base = {
+			options: promptOnly,
+			shape,
+			budget: 90,
+			toolResults: [],
+			hasUserMessage: true,
+		};
+		// 7 frames exceeds the 6-frame system prompt cap.
+		expect(
+			planInlineSwaps({ ...base, systemPrompt: { textTokens: 100000, frames: 7 } }).systemPrompt,
+		).toBeUndefined();
+		// 6 frames ≈ 19800 ≤ 30000 * 0.9 — fits.
+		expect(planInlineSwaps({ ...base, systemPrompt: { textTokens: 30000, frames: 6 } }).systemPrompt).toBeDefined();
+		// 2 frames ≈ 6600 > 7000 * 0.9 — margin gate rejects.
+		expect(planInlineSwaps({ ...base, systemPrompt: { textTokens: 7000, frames: 2 } }).systemPrompt).toBeUndefined();
+		// No user message to carry the frames.
+		expect(
+			planInlineSwaps({ ...base, hasUserMessage: false, systemPrompt: { textTokens: 30000, frames: 6 } })
+				.systemPrompt,
+		).toBeUndefined();
+	});
+});
+
+describe("estimateInlineSavings", () => {
+	it("reports vision-incapable models as inactive with zero savings", () => {
+		const estimate = estimateInlineSavings({
+			options: { renderSystemPrompt: "all", renderToolResults: true },
+			model: makeModel({ input: ["text"] }),
+			systemPrompt: [LARGE],
+			messages: [],
+		});
+		expect(estimate.visionCapable).toBe(false);
+		expect(estimate.savedTokens).toBe(0);
+		expect(estimate.systemPrompt).toBeUndefined();
+		expect(estimate.toolResults).toBeUndefined();
+	});
+
+	it("assumes the next request carries a user message even with empty history", () => {
+		const estimate = estimateInlineSavings({
+			options: { renderSystemPrompt: "all", renderToolResults: false },
+			model: makeModel(),
+			systemPrompt: [LARGE],
+			messages: [],
+		});
+		expect(estimate.visionCapable).toBe(true);
+		expect(estimate.systemPrompt?.applied).toBe(true);
+		expect(estimate.systemPrompt?.frames).toBe(2);
+		expect(estimate.systemPrompt?.imageTokens).toBe(2 * 3300);
+		expect(estimate.systemPrompt?.savedTokens).toBe(
+			estimate.systemPrompt!.textTokens - estimate.systemPrompt!.imageTokens,
+		);
+		expect(estimate.savedTokens).toBe(estimate.systemPrompt!.savedTokens);
+		expect(estimate.savedTokens).toBeGreaterThan(0);
+		expect(estimate.toolResults).toBeUndefined();
+	});
+
+	it("explains why a small system prompt stays text", () => {
+		const estimate = estimateInlineSavings({
+			options: { renderSystemPrompt: "all", renderToolResults: false },
+			model: makeModel(),
+			systemPrompt: ["Be terse."],
+			messages: [],
+		});
+		expect(estimate.systemPrompt?.applied).toBe(false);
+		expect(estimate.systemPrompt?.reason).toBe("margin");
+		expect(estimate.savedTokens).toBe(0);
+	});
+
+	it("matches what the transform actually swaps on the same context", () => {
+		const options = { renderSystemPrompt: "all" as const, renderToolResults: true };
+		const context = makeContext();
+		const model = makeModel();
+
+		const estimate = estimateInlineSavings({
+			options,
+			model,
+			systemPrompt: context.systemPrompt!,
+			messages: context.messages,
+		});
+		const result = new SnapcompactInlineTransformer(options).transform(context, model);
+
+		let imaged = 0;
+		for (const message of result.messages) {
+			if (message.role !== "toolResult") continue;
+			if (message.content.some(block => block.type === "image")) imaged++;
+		}
+		expect(estimate.toolResults?.total).toBe(3);
+		expect(estimate.toolResults?.swapped).toBe(imaged);
+		expect(estimate.toolResults!.savedTokens).toBe(
+			estimate.toolResults!.textTokens - estimate.toolResults!.imageTokens,
+		);
+		// The tiny two-part system prompt stays text in both paths.
+		expect(estimate.systemPrompt?.applied).toBe(false);
+		expect(result.systemPrompt).toBe(context.systemPrompt);
 	});
 });

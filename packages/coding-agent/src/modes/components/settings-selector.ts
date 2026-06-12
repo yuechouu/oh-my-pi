@@ -4,12 +4,11 @@ import {
 	type Component,
 	Container,
 	extractPrintableText,
-	fuzzyFilter,
+	fuzzyRank,
 	getKeybindings,
 	getSettingItemFilterText,
 	Input,
 	matchesKey,
-	padding,
 	parseSgrMouse,
 	type SelectItem,
 	SelectList,
@@ -68,8 +67,6 @@ class TextInputSubmenu extends Container {
 		this.#input = new Input();
 		if (currentValue) {
 			this.#input.setValue(currentValue);
-			// Move cursor to end of pre-filled value (ctrl+e = cursorLineEnd).
-			this.#input.handleInput("\x05");
 		}
 		this.#input.onSubmit = value => {
 			this.onSubmit(value); // empty string clears the setting
@@ -291,6 +288,8 @@ export class SettingsSelectorComponent implements Component {
 	#currentTabId: SettingTab | "plugins" = "appearance";
 	#preSearchTabId: SettingTab | "plugins" = "appearance";
 	#searchQuery = "";
+	/** Single-line editor backing the search banner (cursor, word ops, paste). */
+	#searchInput = new Input();
 	#searchMatchCount = 0;
 	/** First matching item id per tab id, for Tab-key jumps while searching. */
 	#searchFirstMatch = new Map<string, string>();
@@ -354,7 +353,7 @@ export class SettingsSelectorComponent implements Component {
 
 	#footerHintText(): string {
 		if (this.#searchList) {
-			return "Enter/Space to change · Tab to jump tabs · Backspace to edit · Esc to exit search";
+			return "Enter to change · Tab to jump tabs · Esc to exit search";
 		}
 		if (this.#currentTabId === "plugins") {
 			return "Tab to switch tabs · Esc to close";
@@ -366,28 +365,17 @@ export class SettingsSelectorComponent implements Component {
 		return `Enter/Space to change · ${nav} · Type to search · Esc to close`;
 	}
 
-	/** Single-line search banner: accent icon, bold query + caret, right-aligned match count. */
+	/** Single-line search banner: accent icon, editable query with live cursor, right-aligned match count. */
 	#renderSearchBanner(width: number): string {
 		const icon = theme.symbol("icon.search");
 		const countText = this.#searchMatchCount === 1 ? "1 match" : `${this.#searchMatchCount} matches`;
 		const rightWidth = visibleWidth(countText) + 1; // trailing margin
-		// Fixed chrome: " <icon> " prefix plus the "▌" cursor cell.
-		const queryBudget = Math.max(4, width - visibleWidth(icon) - 4 - rightWidth - 1);
-
-		// Keep the tail visible (where the cursor is) when the query overflows.
-		let display = this.#searchQuery;
-		if (visibleWidth(display) > queryBudget) {
-			const chars = [...display];
-			while (chars.length > 1 && visibleWidth(chars.join("")) > queryBudget - 1) {
-				chars.shift();
-			}
-			display = `…${chars.join("")}`;
-		}
-
-		const left = ` ${theme.fg("accent", icon)} ${theme.bold(display)}${theme.fg("accent", "▌")}`;
+		const prefix = ` ${theme.fg("accent", icon)} `;
+		// The input pads itself to exactly this width and keeps the cursor in view.
+		const inputWidth = Math.max(4, width - visibleWidth(prefix) - rightWidth - 1);
+		const inputLine = this.#searchInput.render(inputWidth)[0] ?? "";
 		const count = theme.fg(this.#searchMatchCount > 0 ? "dim" : "warning", countText);
-		const gap = Math.max(1, width - visibleWidth(left) - rightWidth);
-		return truncateToWidth(`${left}${padding(gap)}${count} `, width);
+		return truncateToWidth(`${prefix}${theme.bold(inputLine)} ${count} `, width);
 	}
 
 	/**
@@ -511,6 +499,9 @@ export class SettingsSelectorComponent implements Component {
 	/** Swap the tab content for the global search result list. */
 	#startSearch(initialQuery: string): void {
 		this.#preSearchTabId = this.#currentTabId;
+		this.#searchInput = new Input();
+		this.#searchInput.prompt = "";
+		this.#searchInput.setValue(initialQuery);
 		const list = new SettingsList(
 			[],
 			10,
@@ -547,6 +538,7 @@ export class SettingsSelectorComponent implements Component {
 
 		const counts = new Map<SettingTab, number>();
 		const items: SettingItem[] = [];
+		const tabResults: { tab: SettingTab; matched: SettingItem[]; bestScore: number; order: number }[] = [];
 		this.#searchFirstMatch.clear();
 		let total = 0;
 		for (const tab of SETTING_TABS) {
@@ -555,24 +547,40 @@ export class SettingsSelectorComponent implements Component {
 				const item = this.#defToItem(def);
 				if (item) candidates.push(item);
 			}
-			const matched = fuzzyFilter(candidates, query, getSettingItemFilterText);
+			const ranked = fuzzyRank(candidates, query, getSettingItemFilterText);
+			const matched = ranked.map(result => result.item);
 			counts.set(tab, matched.length);
 			if (matched.length === 0) continue;
 			total += matched.length;
-			const meta = TAB_METADATA[tab];
+			tabResults.push({
+				tab,
+				matched,
+				bestScore: ranked[0]?.score ?? 0,
+				order: SETTING_TABS.indexOf(tab),
+			});
+		}
+
+		tabResults.sort((a, b) => a.bestScore - b.bestScore || a.order - b.order);
+		for (const result of tabResults) {
+			const meta = TAB_METADATA[result.tab];
 			items.push({
-				id: `__tab:${tab}`,
+				id: `__tab:${result.tab}`,
 				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${meta.label}`,
 				currentValue: "",
 				heading: true,
 			});
-			this.#searchFirstMatch.set(tab, matched[0].id);
-			items.push(...matched);
+			this.#searchFirstMatch.set(result.tab, result.matched[0]?.id ?? "");
+			items.push(...result.matched);
 		}
 
 		this.#searchList.setItems(items);
 		this.#searchMatchCount = total;
-		this.#tabBar.setTabs(this.#buildSearchTabs(counts));
+		this.#tabBar.setTabs(
+			this.#buildSearchTabs(
+				counts,
+				tabResults.map(result => result.tab),
+			),
+		);
 		this.#syncTabBarToSelection(this.#searchList.getSelectedItem());
 	}
 
@@ -597,19 +605,24 @@ export class SettingsSelectorComponent implements Component {
 		}
 	}
 
-	/** Matching tabs first (counts attached), the rest muted at the end. */
-	#buildSearchTabs(counts: Map<SettingTab, number>): Tab[] {
+	/** Matching tabs first (counts attached), ordered by best result score; the rest stay muted at the end. */
+	#buildSearchTabs(counts: Map<SettingTab, number>, matchedTabOrder: readonly SettingTab[]): Tab[] {
 		const matched: Tab[] = [];
 		const empty: Tab[] = [];
-		for (const id of SETTING_TABS) {
+		const matchedIds = new Set<SettingTab>(matchedTabOrder);
+		for (const id of matchedTabOrder) {
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
 			const count = counts.get(id) ?? 0;
 			if (count > 0) {
 				matched.push({ id, label: `${icon} ${meta.label} (${count})`, short: `${icon} ${count}` });
-			} else {
-				empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
 			}
+		}
+		for (const id of SETTING_TABS) {
+			if (matchedIds.has(id)) continue;
+			const meta = TAB_METADATA[id];
+			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
+			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
 		}
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
 		empty.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package, muted: true });
@@ -1029,25 +1042,27 @@ export class SettingsSelectorComponent implements Component {
 			this.#endSearch(true);
 			return;
 		}
-		if (kb.matches(data, "tui.editor.deleteCharBackward")) {
-			this.#setSearchQuery([...this.#searchQuery].slice(0, -1).join(""));
-			return;
-		}
-		if (
-			matchesKey(data, "tab") ||
-			matchesKey(data, "shift+tab") ||
-			matchesKey(data, "left") ||
-			matchesKey(data, "right")
-		) {
+		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
 			// Jump between tabs that have matches (muted tabs are skipped).
 			this.#tabBar.handleInput(data);
 			return;
 		}
-		const printable = extractPrintableText(data);
-		if (printable !== undefined) {
-			this.#setSearchQuery(this.#searchQuery + printable);
+		// Selection, paging, and activation stay with the result list.
+		if (
+			kb.matches(data, "tui.select.up") ||
+			kb.matches(data, "tui.select.down") ||
+			kb.matches(data, "tui.select.pageUp") ||
+			kb.matches(data, "tui.select.pageDown") ||
+			kb.matches(data, "tui.select.confirm") ||
+			data === "\n"
+		) {
+			list.handleInput(data);
 			return;
 		}
-		list.handleInput(data);
+		// Everything else edits the query like a regular single-line editor:
+		// cursor movement, word ops, kill ring, undo, paste.
+		this.#searchInput.handleInput(data);
+		const value = this.#searchInput.getValue();
+		if (value !== this.#searchQuery) this.#setSearchQuery(value);
 	}
 }

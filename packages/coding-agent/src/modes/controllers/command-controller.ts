@@ -456,7 +456,7 @@ export class CommandController {
 	}
 
 	handleContextCommand(): void {
-		const breakdown = computeContextBreakdown(this.ctx.session);
+		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
@@ -1526,6 +1526,29 @@ function renderUsageReports(
 		const activeAccountLabel = activeAccount?.email ?? activeAccount?.accountId ?? activeAccount?.projectId;
 		if (activeAccountLabel) {
 			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
+		}
+
+		const resetAccountLines: string[] = [];
+		for (const report of providerReports) {
+			const count = report.resetCredits?.availableCount ?? 0;
+			if (count <= 0) continue;
+			const label =
+				(report.metadata?.email as string | undefined) ??
+				(report.metadata?.accountId as string | undefined) ??
+				"account";
+			const isActive =
+				!!activeAccount &&
+				((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
+					(!!activeAccount.email && activeAccount.email === report.metadata?.email));
+			resetAccountLines.push(
+				`    • ${label}: ${count} saved reset${count === 1 ? "" : "s"}${isActive ? " (active)" : ""}`,
+			);
+		}
+		if (resetAccountLines.length > 0) {
+			lines.push(
+				`  ${uiTheme.fg("accent", "Saved rate-limit resets")} ${uiTheme.fg("dim", "(/usage reset to spend)")}`,
+			);
+			for (const line of resetAccountLines) lines.push(uiTheme.fg("dim", line));
 		}
 
 		const renderableGroups = Array.from(limitGroups.values()).map(group => {
