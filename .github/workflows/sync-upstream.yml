@@ -1,10 +1,12 @@
-name: Sync Upstream
+name: Sync upstream to patched
 
 on:
   schedule:
-    # 每 6 小时检查一次上游是否有更新
-    - cron: '0 */6 * * *'
+    - cron: '17 */6 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   sync:
@@ -14,54 +16,69 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check and sync upstream
+      - name: Set git identity
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Add upstream if not exists
-          git remote add upstream https://github.com/can1357/oh-my-pi.git 2>/dev/null || true
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/can1357/oh-my-pi.git || true
 
-          # Fetch upstream
+      - name: Fetch upstream main
+        run: |
           git fetch upstream main
+          # Fetch tags separately, ignore conflicts with fork's own tags
+          git fetch upstream --tags --force 2>/dev/null || true
 
-          # 比较本地 main 和上游 main，没更新就跳过
-          LOCAL=$(git rev-parse main)
+      # Step 1: upstream main → fork main
+      - name: Check for new upstream commits
+        id: check
+        run: |
           UPSTREAM=$(git rev-parse upstream/main)
-          if [ "$LOCAL" = "$UPSTREAM" ]; then
-            echo "✅ No upstream changes, skipping."
-            exit 0
+          MERGE_BASE=$(git merge-base HEAD upstream/main)
+          if [ "$UPSTREAM" = "$MERGE_BASE" ]; then
+            echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "✅ main is already up to date with upstream"
+          else
+            echo "already_up_to_date=false" >> "$GITHUB_OUTPUT"
+            NEW_COMMITS=$(git rev-list --count "$MERGE_BASE".."$UPSTREAM")
+            echo "📥 Found $NEW_COMMITS new commit(s) from upstream"
           fi
 
-          echo "🔄 Upstream updated: $LOCAL → $UPSTREAM"
-
-          # Merge upstream/main into main
-          git checkout main
-          git merge upstream/main --no-edit --strategy-option theirs || {
-            echo "⚠️ Merge conflict, manual intervention needed"
-            git merge --abort
-            exit 1
-          }
-
-          # Push updated main
-          git push origin main
-
-      - name: Rebase patched branch
-        if: success()
+      - name: Merge upstream into main
+        if: steps.check.outputs.already_up_to_date == 'false'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge upstream/main --no-edit --no-ff \
+            -m "sync: merge upstream/main into main"
 
-          # Rebase patched onto updated main
+      - name: Push main
+        if: steps.check.outputs.already_up_to_date == 'false'
+        run: git push origin main
+
+      # Step 2: fork main → patched
+      - name: Merge main into patched
+        if: steps.check.outputs.already_up_to_date == 'false'
+        run: |
           git checkout patched
-          git rebase main --strategy-option theirs || {
-            echo "⚠️ Rebase conflict, manual intervention needed"
-            git rebase --abort
-            exit 1
-          }
+          git merge main --no-edit --no-ff \
+            -m "sync: merge main into patched"
 
-          # Force push rebased patched
-          git push origin patched --force-with-lease
+      - name: Push patched
+        if: steps.check.outputs.already_up_to_date == 'false'
+        run: git push origin patched
 
-          echo "✅ Synced: main and patched are up to date with upstream."
+      # Step 3: tag with upstream version and trigger Publish Patched
+      - name: Create release tag
+        if: steps.check.outputs.already_up_to_date == 'false'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "⏭️ Tag $TAG already exists, skipping publish"
+          else
+            echo "🏷️ Creating tag $TAG on patched"
+            git tag "$TAG" patched
+            git push origin "$TAG"
+          fi
