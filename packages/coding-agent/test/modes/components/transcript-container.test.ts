@@ -46,7 +46,62 @@ class StreamingBlock implements Component {
 		return this.#finalized;
 	}
 	invalidate(): void {}
+	renderCount = 0;
 	render(_width: number): string[] {
+		this.renderCount++;
+		return [...this.#lines];
+	}
+}
+
+class CountingFinalizedBlock implements Component {
+	renderCount = 0;
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	set(lines: string[]): void {
+		this.#lines = lines;
+	}
+
+	invalidate(): void {}
+
+	render(_width: number): string[] {
+		this.renderCount++;
+		return [...this.#lines];
+	}
+}
+
+// A finalized block that can still mutate afterwards (an assistant message whose
+// suppressed inline error is restored at the next turn, late tool-result images)
+// and reports each mutation through the transcript block version protocol.
+class VersionedFinalizedBlock implements Component {
+	renderCount = 0;
+	#lines: string[];
+	#version = 0;
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	mutate(lines: string[]): void {
+		this.#lines = lines;
+		this.#version++;
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+
+	getTranscriptBlockVersion(): number {
+		return this.#version;
+	}
+
+	invalidate(): void {}
+
+	render(_width: number): string[] {
+		this.renderCount++;
 		return [...this.#lines];
 	}
 }
@@ -216,6 +271,92 @@ describe("TranscriptContainer", () => {
 		expect(container.render(40)).toEqual(["done-collapsed", "", "pending-final", "", "card"]);
 		expect(container.getNativeScrollbackLiveRegionStart()).toBe(4);
 	});
+	it("does not re-render finalized rows already committed to native scrollback", () => {
+		const container = new TranscriptContainer();
+		const committed = new CountingFinalizedBlock(["committed"]);
+		const liveTail = new CountingFinalizedBlock(["tail"]);
+		container.addChild(committed);
+		container.addChild(liveTail);
+
+		expect(container.render(40)).toEqual(["committed", "", "tail"]);
+		expect(committed.renderCount).toBe(1);
+		expect(liveTail.renderCount).toBe(1);
+
+		container.setNativeScrollbackCommittedRows(1);
+		expect(container.render(40)).toEqual(["committed", "", "tail"]);
+		expect(committed.renderCount).toBe(1);
+		expect(liveTail.renderCount).toBe(2);
+
+		container.invalidate();
+		expect(container.render(40)).toEqual(["committed", "", "tail"]);
+		expect(committed.renderCount).toBe(2);
+	});
+	it("re-renders a committed finalized block when its version changes", () => {
+		const container = new TranscriptContainer();
+		const block = new VersionedFinalizedBlock(["original"]);
+		container.addChild(block);
+
+		expect(container.render(40)).toEqual(["original"]);
+		container.setNativeScrollbackCommittedRows(1);
+		expect(container.render(40)).toEqual(["original"]);
+		expect(block.renderCount).toBe(1);
+
+		// Post-finalize mutation (e.g. setErrorPinned(false) restoring the inline
+		// error) must surface even though the rows sit in committed scrollback —
+		// the render is what lets the TUI's committed-prefix audit re-anchor.
+		block.mutate(["original", "Error: boom"]);
+		expect(container.render(40)).toEqual(["original", "Error: boom"]);
+		expect(block.renderCount).toBe(2);
+
+		// Once observed, the bypass re-engages at the new version.
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["original", "Error: boom"]);
+		expect(block.renderCount).toBe(2);
+	});
+	it("renders once after a block finalizes with rows already inside committed scrollback", () => {
+		const container = new TranscriptContainer();
+		const block = new StreamingBlock(["streaming"]);
+		const counting = new CountingFinalizedBlock(["tail"]);
+		container.addChild(block);
+		container.addChild(counting);
+
+		expect(container.render(40)).toEqual(["streaming", "", "tail"]);
+
+		// The block's rows settle into committed scrollback while it is still
+		// live (append-only commit path), then it finalizes with different bytes.
+		// The first post-transition frame must render — the previous segment was
+		// produced by a non-finalized render and is not trustworthy history.
+		container.setNativeScrollbackCommittedRows(3);
+		block.finalize(["streaming", "done"]);
+		const rendersBeforeTransition = block.renderCount;
+		expect(container.render(40)).toEqual(["streaming", "done", "", "tail"]);
+		expect(block.renderCount).toBe(rendersBeforeTransition + 1);
+
+		// The post-finalize render is now trustworthy history: once its rows are
+		// committed, the bypass replays it without calling render().
+		container.setNativeScrollbackCommittedRows(2);
+		const rendersAfterTransition = block.renderCount;
+		expect(container.render(40)).toEqual(["streaming", "done", "", "tail"]);
+		expect(block.renderCount).toBe(rendersAfterTransition);
+	});
+	it("reports a new assistant block version after post-finalize error unpinning", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "hello" }],
+			timestamp: Date.now(),
+			stopReason: "error",
+			errorMessage: "boom",
+		} as AssistantMessage;
+		const component = new AssistantMessageComponent(message);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
+
+		component.setErrorPinned(true);
+		const pinnedVersion = component.getTranscriptBlockVersion();
+		// The restore path at the next turn's agent_start must be observable by
+		// the transcript container's committed-scrollback bypass.
+		component.setErrorPinned(false);
+		expect(component.getTranscriptBlockVersion()).toBeGreaterThan(pinnedVersion);
+	});
 });
 
 describe("TranscriptContainer spacing", () => {
@@ -373,5 +514,43 @@ describe("TranscriptContainer getRenderStablePrefixRows", () => {
 		// The read above re-based the baseline to the just-returned state, so
 		// without any render in between the full array now counts as stable.
 		expect(container.getRenderStablePrefixRows()).toBe(reflowed.length);
+	});
+});
+
+describe("TranscriptContainer isBlockInLiveRegion", () => {
+	it("opens at the first still-mutating block and includes everything below it", () => {
+		const container = new TranscriptContainer();
+		const above = new StreamingBlock(["above"], true);
+		const live = new StreamingBlock(["live"], false);
+		const below = new StreamingBlock(["below"], true);
+		container.addChild(above);
+		container.addChild(live);
+		container.addChild(below);
+
+		expect(container.isBlockInLiveRegion(above)).toBe(false);
+		expect(container.isBlockInLiveRegion(live)).toBe(true);
+		expect(container.isBlockInLiveRegion(below)).toBe(true);
+	});
+
+	it("anchors on the tail block when every block has finalized", () => {
+		const container = new TranscriptContainer();
+		const first = new StreamingBlock(["first"], true);
+		const tail = new StreamingBlock(["tail"], false);
+		container.addChild(first);
+		container.addChild(tail);
+
+		expect(container.isBlockInLiveRegion(tail)).toBe(true);
+		tail.finalize();
+		// All finalized: only the tail anchors the live region — a finalized
+		// block above it is commit-eligible history (a detached task block
+		// stops animating exactly on this transition).
+		expect(container.isBlockInLiveRegion(first)).toBe(false);
+		expect(container.isBlockInLiveRegion(tail)).toBe(true);
+	});
+
+	it("returns false for a component that is not a child", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new StreamingBlock(["a"], true));
+		expect(container.isBlockInLiveRegion(new StreamingBlock(["x"], false))).toBe(false);
 	});
 });

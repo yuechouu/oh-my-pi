@@ -92,69 +92,86 @@ export class SelectorController {
 
 	showSettingsSelector(): void {
 		getAvailableThemes().then(availableThemes => {
-			this.showSelector(done => {
-				const selector = new SettingsSelectorComponent(
-					{
-						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
-						thinkingLevel: this.ctx.session.thinkingLevel,
-						availableThemes,
-						cwd: getProjectDir(),
-					},
-					{
-						onChange: (id, value) => this.handleSettingChange(id, value),
-						onThemePreview: async themeName => {
-							const result = await previewTheme(themeName);
-							if (result.success) {
-								this.ctx.statusLine.invalidate();
-								this.ctx.updateEditorTopBorder();
-								this.ctx.ui.invalidate();
-								this.ctx.ui.requestRender();
-							}
-						},
-						onStatusLinePreview: previewSettings => {
-							// Update status line with preview settings
-							this.ctx.statusLine.updateSettings({
-								preset: settings.get("statusLine.preset"),
-								leftSegments: settings.get("statusLine.leftSegments"),
-								rightSegments: settings.get("statusLine.rightSegments"),
-								separator: settings.get("statusLine.separator"),
-								showHookStatus: settings.get("statusLine.showHookStatus"),
-								sessionAccent: settings.get("statusLine.sessionAccent"),
-								...previewSettings,
-							});
+			// Fullscreen settings editor on the alternate screen: the overlay
+			// enables mouse tracking (click/hover/wheel) for its lifetime and
+			// the transcript stays untouched underneath.
+			let overlayHandle: OverlayHandle | undefined;
+			const done = () => {
+				overlayHandle?.hide();
+				this.ctx.ui.setFocus(this.ctx.editor);
+				this.ctx.ui.requestRender();
+			};
+			const selector = new SettingsSelectorComponent(
+				{
+					availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
+					thinkingLevel: this.ctx.session.thinkingLevel,
+					availableThemes,
+					cwd: getProjectDir(),
+				},
+				{
+					onChange: (id, value) => this.handleSettingChange(id, value),
+					onThemePreview: async themeName => {
+						const result = await previewTheme(themeName);
+						if (result.success) {
+							this.ctx.statusLine.invalidate();
 							this.ctx.updateEditorTopBorder();
+							this.ctx.ui.invalidate();
 							this.ctx.ui.requestRender();
-						},
-						getStatusLinePreview: () => {
-							// Return the rendered status line for inline preview
-							const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-							return this.ctx.statusLine.getTopBorder(availableWidth).content;
-						},
-						onPluginsChanged: async () => {
-							const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
-							clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-							await this.ctx.refreshSlashCommandState();
-							await this.ctx.session.refreshSshTool({ activateIfAvailable: true });
-							this.ctx.ui.requestRender();
-						},
-						onCancel: () => {
-							done();
-							// Restore status line to saved settings
-							this.ctx.statusLine.updateSettings({
-								preset: settings.get("statusLine.preset"),
-								leftSegments: settings.get("statusLine.leftSegments"),
-								rightSegments: settings.get("statusLine.rightSegments"),
-								separator: settings.get("statusLine.separator"),
-								showHookStatus: settings.get("statusLine.showHookStatus"),
-								sessionAccent: settings.get("statusLine.sessionAccent"),
-							});
-							this.ctx.updateEditorTopBorder();
-							this.ctx.ui.requestRender();
-						},
+						}
 					},
-				);
-				return { component: selector, focus: selector };
+					onStatusLinePreview: previewSettings => {
+						// Update status line with preview settings
+						this.ctx.statusLine.updateSettings({
+							preset: settings.get("statusLine.preset"),
+							leftSegments: settings.get("statusLine.leftSegments"),
+							rightSegments: settings.get("statusLine.rightSegments"),
+							separator: settings.get("statusLine.separator"),
+							showHookStatus: settings.get("statusLine.showHookStatus"),
+							sessionAccent: settings.get("statusLine.sessionAccent"),
+							transparent: settings.get("statusLine.transparent"),
+							...previewSettings,
+						});
+						this.ctx.updateEditorTopBorder();
+						this.ctx.ui.requestRender();
+					},
+					getStatusLinePreview: () => {
+						// Return the rendered status line for inline preview
+						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
+						return this.ctx.statusLine.getTopBorder(availableWidth).content;
+					},
+					onPluginsChanged: async () => {
+						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
+						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+						await this.ctx.refreshSlashCommandState();
+						await this.ctx.session.refreshSshTool({ activateIfAvailable: true });
+						this.ctx.ui.requestRender();
+					},
+					onCancel: () => {
+						done();
+						// Restore status line to saved settings
+						this.ctx.statusLine.updateSettings({
+							preset: settings.get("statusLine.preset"),
+							leftSegments: settings.get("statusLine.leftSegments"),
+							rightSegments: settings.get("statusLine.rightSegments"),
+							separator: settings.get("statusLine.separator"),
+							showHookStatus: settings.get("statusLine.showHookStatus"),
+							sessionAccent: settings.get("statusLine.sessionAccent"),
+							transparent: settings.get("statusLine.transparent"),
+						});
+						this.ctx.updateEditorTopBorder();
+						this.ctx.ui.requestRender();
+					},
+				},
+			);
+			overlayHandle = this.ctx.ui.showOverlay(selector, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
 			});
+			this.ctx.ui.setFocus(selector);
+			this.ctx.ui.requestRender();
 		});
 	}
 
@@ -265,6 +282,11 @@ export class SelectorController {
 				this.ctx.statusLine.invalidate();
 				this.ctx.updateEditorBorderColor();
 				break;
+			case "personality":
+				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
+					this.ctx.showError(`Failed to apply personality: ${err}`);
+				});
+				break;
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
@@ -351,6 +373,7 @@ export class SelectorController {
 			case "statusLineShowHooks":
 			case "statusLine.showHookStatus":
 			case "statusLine.sessionAccent":
+			case "statusLine.transparent":
 			case "statusLineSegments":
 			case "statusLineModelThinking":
 			case "statusLinePathAbbreviate":
@@ -369,6 +392,7 @@ export class SelectorController {
 					separator: settings.get("statusLine.separator"),
 					showHookStatus: settings.get("statusLine.showHookStatus"),
 					sessionAccent: settings.get("statusLine.sessionAccent"),
+					transparent: settings.get("statusLine.transparent"),
 					segmentOptions: settings.get("statusLine.segmentOptions"),
 				};
 				this.ctx.statusLine.updateSettings(statusLineSettings);

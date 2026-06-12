@@ -191,7 +191,11 @@ export class UiHelpers {
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}
-					if (message.customType === "irc:incoming" || message.customType === "irc:relay") {
+					if (
+						message.customType === "irc:incoming" ||
+						message.customType === "irc:autoreply" ||
+						message.customType === "irc:relay"
+					) {
 						const details = (
 							message as CustomMessage<{
 								from?: string;
@@ -201,13 +205,18 @@ export class UiHelpers {
 								replyTo?: string;
 							}>
 						).details;
-						const incoming = message.customType === "irc:incoming";
+						const kind =
+							message.customType === "irc:incoming"
+								? ("incoming" as const)
+								: message.customType === "irc:autoreply"
+									? ("autoreply" as const)
+									: ("relay" as const);
 						const card = createIrcMessageCard(
 							{
-								kind: incoming ? "incoming" : "relay",
+								kind,
 								from: details?.from,
 								to: details?.to,
-								body: incoming ? details?.message : details?.body,
+								body: kind === "incoming" ? details?.message : details?.body,
 								replyTo: details?.replyTo,
 								timestamp: message.timestamp,
 							},
@@ -421,6 +430,7 @@ export class UiHelpers {
 							showImages: settings.get("terminal.showImages"),
 							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+							liveRegion: this.ctx.chatContainer,
 						},
 						tool,
 						this.ctx.ui,
@@ -651,10 +661,13 @@ export class UiHelpers {
 			await this.ctx.session.prompt(message.text);
 			return;
 		}
-		await this.ctx.withLocalSubmission(message.text, () =>
-			message.mode === "followUp"
-				? this.ctx.session.followUp(message.text, message.images)
-				: this.ctx.session.steer(message.text, message.images),
+		await this.ctx.withLocalSubmission(
+			message.text,
+			() =>
+				message.mode === "followUp"
+					? this.ctx.session.followUp(message.text, message.images)
+					: this.ctx.session.steer(message.text, message.images),
+			{ imageCount: message.images?.length ?? 0 },
 		);
 	}
 
@@ -744,7 +757,7 @@ export class UiHelpers {
 			// firstPrompt is fire-and-forget — its rejection is funneled through
 			// `restoreQueue` rather than rethrown, so we use the primitive
 			// recordLocalSubmission and dispose manually in the catch.
-			const disposeFirstPrompt = this.ctx.recordLocalSubmission(firstPrompt.text);
+			const disposeFirstPrompt = this.ctx.recordLocalSubmission(firstPrompt.text, firstPrompt.images?.length ?? 0);
 			const promptPromise = this.ctx.session
 				.prompt(firstPrompt.text, {
 					streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
